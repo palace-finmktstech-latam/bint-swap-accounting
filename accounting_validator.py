@@ -346,6 +346,281 @@ def parse_rules_file(file):
     
     return df
 
+def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, debug_deal=None):
+    """
+    Validate day trades against accounting interface entries.
+    
+    For each day trade, checks that:
+    1. Corresponding "Curse" entries exist in the accounting interface
+    2. Correct account numbers are used based on instrument type
+    3. Transaction amounts match the Monto Activo value
+    4. Amounts are in the correct fields (debe/haber)
+    5. The number of entries exactly matches what's expected from rules
+    """
+    # Filter rules for INICIO event
+    inicio_rules = rules_df[rules_df['event'] == 'Curse'].copy()
+    
+    if len(inicio_rules) == 0:
+        st.error("No INICIO/Curse rules found in rules file")
+        return pd.DataFrame()
+    
+    st.subheader("INICIO/Curse Rules")
+    st.dataframe(inicio_rules, use_container_width=True, hide_index=True)
+    
+    # Extract needed columns from interface
+    trade_number_col = next((col for col in interface_df.columns if any(x in str(col).lower() for x in ['operación', 'operacion', 'nro.'])), None)
+    debit_col = interface_cols['debit']
+    credit_col = interface_cols['credit']
+    account_col = interface_cols['account']
+    glosa_col = interface_cols['glosa']
+    
+    # Filter interface for "Curse" event_type entries
+    curse_entries = interface_df[interface_df['event_type'] == 'Curse'].copy()
+    st.write(f"Found {len(curse_entries)} Curse entries in interface file")
+    
+    # Ensure numeric values
+    curse_entries[debit_col] = pd.to_numeric(curse_entries[debit_col], errors='coerce').fillna(0)
+    curse_entries[credit_col] = pd.to_numeric(curse_entries[credit_col], errors='coerce').fillna(0)
+    
+    # Prepare validation results
+    validation_results = []
+    
+    # Process each day trade
+    for _, trade in day_trades_df.iterrows():
+        trade_number = trade['Número Operación']
+        
+        # Skip if not the debug deal (when in debug mode)
+        if debug_deal is not None and str(trade_number) != str(debug_deal):
+            continue
+            
+        instrument_type = trade['instrument_type']
+        monto_activo = trade['Monto Activo']
+        currency = trade['Moneda Activa']
+        
+        # Display debug info if requested
+        if debug_deal is not None:
+            st.write(f"DEBUG: Processing trade {trade_number}, instrument: {instrument_type}, amount: {monto_activo}, currency: {currency}")
+        
+        # Get applicable rules for this instrument type
+        applicable_rules = inicio_rules[inicio_rules['subproduct'] == instrument_type]
+        
+        if len(applicable_rules) == 0:
+            validation_results.append({
+                'trade_number': str(trade_number),
+                'instrument_type': instrument_type,
+                'monto_activo': monto_activo,
+                'currency': currency,
+                'status': 'Missing Rule',
+                'interface_entries': 0,
+                'expected_entries': 0,
+                'issue': f'No rule found for {instrument_type}'
+            })
+            continue
+            
+        # Count how many unique accounts are expected
+        expected_accounts = []
+        for _, rule in applicable_rules.iterrows():
+            if pd.notna(rule['debit_account']):
+                expected_accounts.append(str(rule['debit_account']))
+            if pd.notna(rule['credit_account']):
+                expected_accounts.append(str(rule['credit_account']))
+
+        # Remove any "None" values
+        expected_accounts = [acc for acc in expected_accounts if acc != "None" and acc != "nan"]
+        expected_entry_count = len(expected_accounts)
+            
+        # Find interface entries for this trade
+        # Filter by trade number and ensure the glosa contains "Curse"
+        trade_entries = curse_entries[
+            (curse_entries[trade_number_col] == trade_number)
+        ]
+        
+        if debug_deal is not None:
+            st.write(f"Found {len(trade_entries)} entries for trade {trade_number} in interface")
+            st.write(f"Expected {expected_entry_count} entries based on rules")
+            st.write(f"Expected account numbers: {expected_accounts}")
+            st.dataframe(trade_entries, use_container_width=True, hide_index=True)
+        
+        if len(trade_entries) == 0:
+            validation_results.append({
+                'trade_number': str(trade_number),
+                'instrument_type': instrument_type,
+                'monto_activo': monto_activo,
+                'currency': currency,
+                'status': 'Missing Entries',
+                'interface_entries': 0,
+                'expected_entries': expected_entry_count,
+                'issue': f'No Curse entries found in interface for trade {trade_number}'
+            })
+            continue
+        
+        # Check if we found exactly the right number of entries
+        if len(trade_entries) != expected_entry_count:
+            validation_results.append({
+                'trade_number': str(trade_number),
+                'instrument_type': instrument_type,
+                'monto_activo': monto_activo,
+                'currency': currency,
+                'status': 'Entry Count Mismatch',
+                'interface_entries': len(trade_entries),
+                'expected_entries': expected_entry_count,
+                'issue': f'Expected {expected_entry_count} entries, found {len(trade_entries)}'
+            })
+            continue
+            
+        # Check if each expected account is present
+        found_accounts = trade_entries[account_col].astype(str).unique().tolist()
+        missing_accounts = [acc for acc in expected_accounts if acc not in found_accounts]
+        extra_accounts = [acc for acc in found_accounts if acc not in expected_accounts]
+
+        if missing_accounts:
+            validation_results.append({
+                'trade_number': str(trade_number),
+                'instrument_type': instrument_type,
+                'monto_activo': monto_activo,
+                'currency': currency,
+                'status': 'Missing Accounts',
+                'interface_entries': len(trade_entries),
+                'expected_entries': expected_entry_count,
+                'issue': f'Missing expected accounts: {", ".join(missing_accounts)}'
+            })
+            continue
+
+        if extra_accounts:
+            validation_results.append({
+                'trade_number': str(trade_number),
+                'instrument_type': instrument_type,
+                'monto_activo': monto_activo,
+                'currency': currency,
+                'status': 'Extra Accounts',
+                'interface_entries': len(trade_entries),
+                'expected_entries': expected_entry_count,
+                'issue': f'Found unexpected accounts: {", ".join(extra_accounts)}'
+            })
+            continue
+        
+        # At this point we have the right number of entries with the right accounts
+        # Now check the amounts in each entry
+        
+        # Create a dictionary to track amount validation for each account
+        account_validation = {}
+        for account in expected_accounts:
+            account_entries = trade_entries[trade_entries[account_col].astype(str) == account]
+            
+            # Determine if this is a debit or credit account based on rules
+            is_debit_account = any(
+                pd.notna(rule['debit_account']) and str(rule['debit_account']) == account 
+                for _, rule in applicable_rules.iterrows()
+            )
+            
+            is_credit_account = any(
+                pd.notna(rule['credit_account']) and str(rule['credit_account']) == account 
+                for _, rule in applicable_rules.iterrows()
+            )
+            
+            # Get the total amount in the expected field
+            if is_debit_account:
+                amount = account_entries[debit_col].sum()
+                expected_field = 'debit'
+            elif is_credit_account:
+                amount = account_entries[credit_col].sum()  
+                expected_field = 'credit'
+            else:
+                amount = 0
+                expected_field = 'unknown'
+            
+            # Check if amount matches the expected value
+            is_matching = abs(amount - monto_activo) < 1.0
+            
+            account_validation[account] = {
+                'expected_field': expected_field,
+                'amount': amount,
+                'matches': is_matching
+            }
+            
+            if debug_deal is not None:
+                if is_matching:
+                    st.success(f"✓ Account {account} ({expected_field}): Expected {monto_activo}, Found {amount:.2f}")
+                else:
+                    st.warning(f"✗ Account {account} ({expected_field}): Expected {monto_activo}, Found {amount:.2f}")
+        
+        # Check if all amounts match
+        all_match = all(val['matches'] for val in account_validation.values())
+        
+        if all_match:
+            status = 'Full Match'
+            issue = ''
+        else:
+            status = 'Amount Mismatch'
+            mismatches = [
+                f"{account} ({val['expected_field']}): Expected {monto_activo}, Found {val['amount']:.2f}"
+                for account, val in account_validation.items() if not val['matches']
+            ]
+            issue = f"Amount mismatches: {'; '.join(mismatches)}"
+        
+        # Add to results
+        validation_results.append({
+            'trade_number': str(trade_number),
+            'instrument_type': instrument_type,
+            'monto_activo': monto_activo,
+            'currency': currency,
+            'status': status,
+            'interface_entries': len(trade_entries),
+            'expected_entries': expected_entry_count,
+            'issue': issue
+        })
+    
+    # Create validation results dataframe
+    validation_df = pd.DataFrame(validation_results)
+    
+    if len(validation_df) > 0:
+        # Format for display
+        for col in validation_df.columns:
+            if validation_df[col].dtype == 'object':
+                validation_df[col] = validation_df[col].astype(str)
+        
+        # Round numeric columns
+        numeric_cols = validation_df.select_dtypes(include=['float64', 'int64']).columns
+        for col in numeric_cols:
+            validation_df[col] = validation_df[col].round(2)
+        
+        # Display validation results
+        st.subheader("Day Trades Validation Results")
+        st.write("Validates that trades in the day trades file have corresponding Curse entries in the accounting interface")
+        st.dataframe(validation_df, use_container_width=True, hide_index=True)
+        
+        # Calculate match statistics
+        full_match_count = len(validation_df[validation_df['status'] == 'Full Match'])
+        total_count = len(validation_df)
+        match_percentage = (full_match_count / total_count * 100) if total_count > 0 else 0
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Trades", total_count)
+        with col2:
+            st.metric("Full Matches", full_match_count)
+        with col3:
+            st.metric("Match Rate", f"{match_percentage:.1f}%")
+        
+        # Status breakdown
+        status_counts = validation_df['status'].value_counts().to_dict()
+        st.subheader("Status Breakdown")
+        st.write(status_counts)
+        
+        # Download results
+        csv = validation_df.to_csv().encode('utf-8')
+        st.download_button(
+            "Download Day Trades Validation Results",
+            csv,
+            "day_trades_validation_results.csv",
+            "text/csv",
+            key="download-csv-day-trades"
+        )
+    else:
+        st.warning("No day trades validation results generated")
+    
+    return validation_df
+
 def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_df, 
                           event_type='Valorización MTM', 
                           rules_event_type=None,
@@ -712,6 +987,8 @@ if interface_file and mtm_file and rules_file:
     
     with col1:
         run_mtm_validation = st.checkbox("Run MTM Valorization Validation", value=True)
+        run_day_trades_validation = st.checkbox("Run Day Trades Validation", 
+                                           value=day_trades_df is not None)
     
     with col2:
         run_reversal_validation = st.checkbox("Run MTM Reversal Validation", value=mtm_t1_file is not None)
@@ -722,6 +999,17 @@ if interface_file and mtm_file and rules_file:
     # Run validations
     if st.button("Run Validation"):
         with st.spinner("Running validation..."):
+            # Run day trades validation if selected
+            if run_day_trades_validation and day_trades_df is not None:
+                st.header("Day Trades Validation")
+                day_trades_results = validate_day_trades(
+                    day_trades_df,
+                    interface_df,
+                    interface_cols,
+                    rules_df,
+                    debug_deal=debug_deal
+                )
+            
             # Run MTM validation if selected
             if run_mtm_validation:
                 st.header("MTM Valorization Validation")
