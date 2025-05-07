@@ -11,6 +11,102 @@ st.set_page_config(
 import pandas as pd
 import numpy as np
 
+def parse_day_trades_file(file):
+    """Parse the day trades CSV file."""
+    # First, try to inspect the file content to determine the format
+    file.seek(0)  # Reset file pointer to beginning
+    sample = file.read(4096).decode('latin1')  # Read a sample to inspect
+    file.seek(0)  # Reset file pointer again
+    
+    st.write("Sample of file content:")
+    st.text(sample[:500])  # Show first 500 characters
+    
+    # Try to detect the delimiter
+    if ';' in sample:
+        delimiter = ';'
+    elif ',' in sample:
+        delimiter = ','
+    elif '\t' in sample:
+        delimiter = '\t'
+    else:
+        delimiter = None
+    
+    st.write(f"Detected delimiter: {delimiter}")
+    
+    # Try different parsing approaches
+    try:
+        # Try with detected delimiter
+        if delimiter:
+            df = pd.read_csv(file, delimiter=delimiter, encoding='latin1')
+        else:
+            # If no delimiter detected, try with default
+            df = pd.read_csv(file, encoding='latin1')
+    except Exception as e:
+        st.error(f"First parsing attempt failed: {str(e)}")
+        
+        # Reset file pointer
+        file.seek(0)
+        
+        try:
+            # Try with excel-like parsing
+            df = pd.read_csv(file, encoding='latin1', sep=None, engine='python')
+        except Exception as e:
+            st.error(f"Second parsing attempt failed: {str(e)}")
+            return pd.DataFrame()
+    
+    # Check if we got any data
+    if len(df.columns) <= 1:
+        st.error("Failed to properly parse columns from the CSV file")
+        st.write("Found columns:", df.columns.tolist())
+        return pd.DataFrame()
+    
+    st.write("Day trades file columns:", df.columns.tolist())
+    
+    # Check if the required columns exist
+    required_columns = ['Número Operación', 'Producto', 'Subproducto', 'Moneda Activa', 'Monto Activo']
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    
+    if missing_columns:
+        st.error(f"Missing required columns in day trades file: {', '.join(missing_columns)}")
+        return pd.DataFrame()
+    
+    # Convert numeric columns to appropriate types
+    df['Número Operación'] = pd.to_numeric(df['Número Operación'], errors='coerce')
+    df['Monto Activo'] = pd.to_numeric(df['Monto Activo'], errors='coerce')
+    
+    # Map subproduct codes to instrument types
+    subproduct_mapping = {
+        'Moneda': 'Swap Moneda',
+        'Tasa': 'Swap Tasa',
+        'Cámara': 'Swap Cámara'
+    }
+    
+    # Create instrument_type column based on Subproducto
+    df['instrument_type'] = df['Subproducto'].map(subproduct_mapping)
+    
+    # Display summary information
+    st.write(f"Found {len(df)} day trades")
+    
+    # Show product distribution
+    product_counts = df['Producto'].value_counts()
+    st.write("Product counts:", product_counts.to_dict())
+    
+    # Show subproduct distribution
+    subproduct_counts = df['Subproducto'].value_counts()
+    st.write("Subproduct counts:", subproduct_counts.to_dict())
+    
+    # Show instrument type mapping results
+    instrument_counts = df['instrument_type'].value_counts(dropna=False)
+    st.write("Instrument type counts:", instrument_counts.to_dict())
+    
+    # Display preview of the parsed data
+    st.subheader("Day Trades Preview")
+    preview_columns = ['Número Operación', 'Producto', 'Subproducto', 'instrument_type', 
+                     'Moneda Activa', 'Monto Activo']
+    st.dataframe(df[preview_columns], use_container_width=True)
+    
+    return df
+
 def parse_interface_file(file):
     """Parse the accounting interface Excel file."""
     # Read the Excel file with headers on row 11 (index 10)
@@ -571,6 +667,8 @@ st.title("Accounting Interface Validator")
 with st.sidebar:
     st.header("Upload Files")
     interface_file = st.file_uploader("Upload Accounting Interface File", type=["xls", "xlsx"])
+    day_trades_file = st.file_uploader("Upload Day Trades File", type=["csv"], 
+                                    help="New trades entered today")
     mtm_file = st.file_uploader("Upload MTM File (T)", type=["xlsx", "csv"])
     mtm_t1_file = st.file_uploader("Upload MTM File (T-1)", type=["xlsx", "csv"], 
                                  help="Previous day's MTM file for reversal validation")
@@ -599,6 +697,12 @@ if interface_file and mtm_file and rules_file:
         with st.expander("MTM File (T-1)", expanded=False):
             mtm_t1_df, mtm_t1_sums = parse_mtm_file(mtm_t1_file)
     
+    # Parse day trades file if provided
+    day_trades_df = None
+    if day_trades_file:
+        with st.expander("Day Trades File", expanded=False):
+            day_trades_df = parse_day_trades_file(day_trades_file)
+            
     with st.expander("Rules File", expanded=False):
         rules_df = parse_rules_file(rules_file)
     
