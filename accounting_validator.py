@@ -1,4 +1,13 @@
 import streamlit as st
+st.set_page_config(
+    page_title="Accounting Interface Validator",
+    layout="wide",
+    initial_sidebar_state="expanded",
+    menu_items={
+        "About": "Accounting Interface Validator for Bank Internacional"
+    }
+)
+
 import pandas as pd
 import numpy as np
 
@@ -48,7 +57,9 @@ def parse_interface_file(file):
         df['event_type'] = df[glosa_col].apply(lambda x: 
             'Valorización MTM' if 'Valorización' in x or 'MTM' in x 
             else ('Curse' if 'Curse' in x 
-            else ('Vcto' if 'Vcto' in x else None)))
+            else ('Vcto' if 'Vcto' in x 
+            else ('Reversa Valorización MTM' if 'Reversa' in x or 'Reverso' in x 
+            else None))))
         
         # Extract instrument type
         df['instrument_type'] = df[glosa_col].apply(lambda x: 
@@ -212,7 +223,8 @@ def parse_rules_file(file):
             'INICIO': 'Curse',
             'VALORIZACION': 'Valorización MTM',
             'VENCIMIENTO': 'Vcto',
-            'TERMINO': 'Vcto'
+            'TERMINO': 'Vcto',
+            'REVERSA_VALORIZACION': 'Reversa Valorización MTM'
         }
         df['event'] = df['event'].map(event_mapping)
     
@@ -238,27 +250,38 @@ def parse_rules_file(file):
     
     return df
 
-def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_df, debug_deal=None):
+def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_df, 
+                          event_type='Valorización MTM', 
+                          rules_event_type=None,
+                          key_suffix='', 
+                          debug_deal=None):
+    
+    # Use rules_event_type if provided, otherwise default to event_type
+    filter_event = rules_event_type if rules_event_type else event_type
+    
+    # Filter rules using the appropriate event type
+    mtm_rules = rules_df[rules_df['event'] == filter_event].copy()
+    
     """
-    Validate MTM entries against expected entries from rules with a cleaner approach:
+    Validate MTM entries against expected entries from rules:
     1. Identify expected entries from rules
     2. Get MTM values from MTM file
     3. Match with accounting interface entries
     4. Report on full, partial or non-matches
     """
-    #if debug_deal is not None:
-    #    st.write(f"DEBUG: Analyzing deal number {debug_deal}")
+    if debug_deal is not None:
+        st.write(f"DEBUG: Analyzing deal number {debug_deal}")
     
-    # Filter rules for MTM event
-    mtm_rules = rules_df[rules_df['event'] == 'Valorización MTM'].copy()
-    st.write(f"Found {len(mtm_rules)} MTM rules")
+    # Filter rules for specified event type
+    #mtm_rules = rules_df[rules_df['event'] == event_type].copy()
+    st.write(f"Found {len(mtm_rules)} {event_type} rules")
     
     # Display MTM rules
-    st.subheader("MTM Rules")
+    st.subheader(f"{event_type} Rules")
     st.dataframe(mtm_rules, use_container_width=True, hide_index=True)
     
     if len(mtm_rules) == 0:
-        st.error("No MTM rules found in rules file")
+        st.error(f"No {event_type} rules found in rules file")
         return pd.DataFrame()
     
     # Find required columns
@@ -285,8 +308,8 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
     }
     product_mapping_reverse = {v: k for k, v in product_mapping.items()}
     
-    # Extract account interface entries for MTM
-    mtm_entries = interface_df[interface_df['event_type'] == 'Valorización MTM'].copy()
+    # Extract account interface entries for specified event type
+    mtm_entries = interface_df[interface_df['event_type'] == event_type].copy()
     debit_col = interface_cols['debit']
     credit_col = interface_cols['credit']
     account_col = interface_cols['account']
@@ -296,7 +319,7 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
     mtm_entries[debit_col] = pd.to_numeric(mtm_entries[debit_col], errors='coerce').fillna(0)
     mtm_entries[credit_col] = pd.to_numeric(mtm_entries[credit_col], errors='coerce').fillna(0)
     
-    st.write(f"Found {len(mtm_entries)} MTM entries in interface file")
+    st.write(f"Found {len(mtm_entries)} {event_type} entries in interface file")
     
     # Initialize validation results
     validation_results = []
@@ -315,6 +338,8 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
         
         mtm_value = deal_row['total_mtm']
         mtm_abs = abs(mtm_value)
+        
+        # Direction is the same for both normal and reversal validation
         direction = 'POSITIVO' if mtm_value > 0 else 'NEGATIVO'
         
         # Find the instrument type for this deal
@@ -330,8 +355,8 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
                 st.warning(f"Unknown product code: {product_code} for deal {deal_number}")
             continue
         
-        #if debug_deal is not None:
-        #    st.write(f"DEBUG: Processing deal {deal_number}, instrument: {instrument_type}, direction: {direction}, MTM: {mtm_abs:.2f}")
+        if debug_deal is not None:
+            st.write(f"DEBUG: Processing deal {deal_number}, instrument: {instrument_type}, direction: {direction}, MTM: {mtm_abs:.2f}")
         
         # STEP 1: Find applicable rules
         applicable_rules = mtm_rules[
@@ -352,9 +377,6 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
             })
             continue
         
-        #st.write(f"Debug_deal: {debug_deal}")
-        #st.write(f"DEBUG: Applicable rules: {applicable_rules}")
-
         if debug_deal is not None:
             st.write(f"Found {len(applicable_rules)} applicable rules:")
             st.dataframe(applicable_rules, use_container_width=True, hide_index=True)
@@ -387,37 +409,7 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
             st.write(f"Expected accounts: {[acc['account'] for acc in expected_accounts]}")
         
         # STEP 3: Find matching entries in the interface file
-        # Filter by trade number and instrument type
-        #st.write(f"Deal number: {deal_number}")
-        #st.write(f"Instrument type: {instrument_type}")
-        #st.write(f"Trade number column: {trade_number_col}")
-        #st.write(f"Trade number column type: {type(mtm_entries[trade_number_col])}")
-        #st.write(f"Deal number type: {type(deal_number)}")
-
-        # Debug trade number column values
-        #st.write("Sample of trade numbers in mtm_entries:")
-        #st.write(mtm_entries[trade_number_col].head().tolist())
-        #st.write("Unique trade numbers in mtm_entries:")
-        #st.write(mtm_entries[trade_number_col].unique().tolist())
-
-        # Debug instrument type values
-        #st.write("Sample of instrument types in mtm_entries:")
-        #st.write(mtm_entries['instrument_type'].head().tolist())
-        #st.write("Unique instrument types in mtm_entries:")
-        #st.write(mtm_entries['instrument_type'].unique().tolist())
-
-        # Try filtering step by step to see where it fails
-        #st.write("Testing filters separately:")
-
-        # Test trade number filter
-        #trade_number_matches = mtm_entries[mtm_entries[trade_number_col] == deal_number]
-        #st.write(f"Entries matching trade number {deal_number}: {len(trade_number_matches)}")
-
-        # Test instrument type filter
-        #instrument_matches = mtm_entries[mtm_entries['instrument_type'] == instrument_type]
-        #st.write(f"Entries matching instrument type {instrument_type}: {len(instrument_matches)}")
-
-        # Now apply the filter
+        # Filter by trade number
         deal_entries = mtm_entries[
             (mtm_entries[trade_number_col] == deal_number)
         ]
@@ -443,45 +435,16 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
         # STEP 4: Match entries with expected accounts
         matched_entries = 0
         value_matched_entries = 0
+        total_debit_sum = 0
+        total_credit_sum = 0
         
         for expected in expected_accounts:
             account = expected['account']
             entry_type = expected['type']
 
-            # Format debug information in a more readable way
-            #st.write("---")
-            #st.write("### Account Matching Details")
-            #col1, col2 = st.columns(2)
-            #with col1:
-            #    st.write("**Expected Account Information:**")
-            #    st.write(f"- Account: {account}")
-            #    st.write(f"- Type: {entry_type}")
-            #    st.write(f"- Expected MTM Value: {mtm_abs:.2f}")
-            
             # Filter by account
             account_entries = deal_entries[deal_entries[account_col].astype(str) == account]
             
-            #with col2:
-            #    st.write("**Found Entries:**")
-            #    if len(account_entries) > 0:
-            #        st.write(f"- Number of entries found: {len(account_entries)}")
-            #        if entry_type == 'debit':
-            #            entry_value = account_entries[debit_col].sum()
-            #        else:
-            #            entry_value = account_entries[credit_col].sum()
-            #        st.write(f"- Total value: {entry_value:.2f}")
-            #        st.write(f"- Difference from expected: {abs(entry_value - mtm_abs):.2f}")
-            #    else:
-            #        st.write("- No matching entries found")
-
-            #if len(account_entries) > 0:
-            #    st.write("**Entry Details:**")
-            #    st.dataframe(
-            #        account_entries[[account_col, debit_col, credit_col]],
-            #        use_container_width=True,
-            #        hide_index=True
-            #    )
-
             if len(account_entries) == 0:
                 if debug_deal is not None:
                     st.warning(f"No entries found for account {account}")
@@ -491,6 +454,7 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
             if entry_type == 'debit':
                 # Sum debit values for this account
                 entry_value = account_entries[debit_col].sum()
+                total_debit_sum += entry_value
                 if abs(entry_value - mtm_abs) < 1.0:
                     expected['matched'] = True
                     matched_entries += 1
@@ -505,6 +469,7 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
             else:  # credit
                 # Sum credit values for this account
                 entry_value = account_entries[credit_col].sum()
+                total_credit_sum += entry_value
                 if abs(entry_value - mtm_abs) < 1.0:
                     expected['matched'] = True
                     matched_entries += 1
@@ -517,9 +482,6 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
                     if debug_deal is not None:
                         st.warning(f"✗ Found credit entry with incorrect value: Account {account}, Expected {mtm_abs:.2f}, Found {entry_value:.2f}")
         
-        #st.write(f"DEBUG: Matched entries: {matched_entries}")
-        #st.write(f"DEBUG: Value matched entries: {value_matched_entries}")
-
         # Determine overall match status
         if matched_entries == 0:
             status = 'No Match'
@@ -529,7 +491,7 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
             issue = ''
         elif matched_entries > 0:
             status = 'Partial Match'
-            issue = f'Found {matched_entries} account matches, but only {value_matched_entries} with correct values. Expected MTM: {mtm_abs:.2f} not found in Accounting Interface'
+            issue = f'Found {matched_entries} account matches, but only {value_matched_entries} with correct values. Expected MTM: {mtm_abs:.2f}, Found debit: {total_debit_sum:.2f}, Found credit: {total_credit_sum:.2f}'
         else:
             status = 'Unknown'
             issue = 'Validation logic error'
@@ -562,7 +524,7 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
             validation_df[col] = validation_df[col].round(2)
         
         # Display validation results
-        st.subheader("Validation Results")
+        st.subheader(f"{event_type} Validation Results")
         st.write(f"Matches made on combination of trade number, debe/haber, account number and MtM value. Partial matches are considered where the first three elements match but the MtM value does not.")
         st.dataframe(validation_df, use_container_width=True, hide_index=True)
         
@@ -586,10 +548,20 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
         
         # Status breakdown
         status_counts = validation_df['status'].value_counts().to_dict()
-        st.subheader("Status Breakdown")
+        st.subheader(f"{event_type} Status Breakdown")
         st.write(status_counts)
+        
+        # Allow downloading results
+        csv = validation_df.to_csv().encode('utf-8')
+        st.download_button(
+            f"Download {event_type} Results",
+            csv,
+            f"{event_type.lower().replace(' ', '_')}_validation_results.csv",
+            "text/csv",
+            key=f'download-csv-{event_type.lower().replace(" ", "_")}{key_suffix}'
+        )
     else:
-        st.warning("No validation results generated")
+        st.warning(f"No {event_type} validation results generated")
     
     return validation_df
 
@@ -599,8 +571,15 @@ st.title("Accounting Interface Validator")
 with st.sidebar:
     st.header("Upload Files")
     interface_file = st.file_uploader("Upload Accounting Interface File", type=["xls", "xlsx"])
-    mtm_file = st.file_uploader("Upload MTM File", type=["xlsx", "csv"])
+    mtm_file = st.file_uploader("Upload MTM File (T)", type=["xlsx", "csv"])
+    mtm_t1_file = st.file_uploader("Upload MTM File (T-1)", type=["xlsx", "csv"], 
+                                 help="Previous day's MTM file for reversal validation")
     rules_file = st.file_uploader("Upload Accounting Rules", type=["xlsx", "csv"])
+    
+    # Debug options
+    st.subheader("Debug Options")
+    debug_deal = st.text_input("Debug specific deal number (optional)", "")
+    debug_deal = debug_deal if debug_deal else None
 
 # Main area
 if interface_file and mtm_file and rules_file:
@@ -610,16 +589,61 @@ if interface_file and mtm_file and rules_file:
     with st.expander("Interface File", expanded=False):
         interface_df, interface_cols = parse_interface_file(interface_file)
     
-    with st.expander("MTM File", expanded=False):
+    with st.expander("MTM File (T)", expanded=False):
         mtm_df, mtm_sums = parse_mtm_file(mtm_file)
+    
+    # Parse MTM T-1 file if provided
+    mtm_t1_df = None
+    mtm_t1_sums = None
+    if mtm_t1_file:
+        with st.expander("MTM File (T-1)", expanded=False):
+            mtm_t1_df, mtm_t1_sums = parse_mtm_file(mtm_t1_file)
     
     with st.expander("Rules File", expanded=False):
         rules_df = parse_rules_file(rules_file)
     
-    # Validate entries
+    # Validation options
+    st.subheader("Validation Options")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        run_mtm_validation = st.checkbox("Run MTM Valorization Validation", value=True)
+    
+    with col2:
+        run_reversal_validation = st.checkbox("Run MTM Reversal Validation", value=mtm_t1_file is not None)
+        if run_reversal_validation and mtm_t1_file is None:
+            st.warning("MTM File (T-1) is required for reversal validation")
+            run_reversal_validation = False
+    
+    # Run validations
     if st.button("Run Validation"):
         with st.spinner("Running validation..."):
-            #results_df = validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_df, debug_deal="2497.0")
-            results_df = validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_df)
+            # Run MTM validation if selected
+            if run_mtm_validation:
+                st.header("MTM Valorization Validation")
+                mtm_results = validate_mtm_entries(
+                    interface_df, 
+                    interface_cols, 
+                    mtm_df, 
+                    mtm_sums, 
+                    rules_df, 
+                    event_type='Valorización MTM',
+                    debug_deal=debug_deal
+                )
+            
+            # Run reversal validation if selected and T-1 file is provided
+            if run_reversal_validation and mtm_t1_df is not None:
+                st.header("MTM Reversal Validation")
+                reversal_results = validate_mtm_entries(
+                    interface_df, 
+                    interface_cols, 
+                    mtm_t1_df, 
+                    mtm_t1_sums, 
+                    rules_df, 
+                    event_type='Valorización MTM',      # For interface file filtering
+                    rules_event_type='Reversa Valorización MTM',  # For rules file filtering
+                    key_suffix='-reversal',
+                    debug_deal=debug_deal
+                )
 else:
-    st.info("Please upload the Accounting Interface, MTM, and Rules files to start validation.")
+    st.info("Please upload the required files to start validation.")
