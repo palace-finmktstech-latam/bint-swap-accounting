@@ -325,7 +325,7 @@ def parse_day_trades_file(file):
     st.write("Day trades file columns:", df.columns.tolist())
     
     # Check if the required columns exist
-    required_columns = ['Número Operación', 'Producto', 'Subproducto', 'Moneda Activa', 'Monto Activo']
+    required_columns = ['Número Operación', 'Producto', 'Subproducto', 'Moneda Activa', 'Monto Activo', 'Moneda Pasiva', 'Monto Pasivo']
     missing_columns = [col for col in required_columns if col not in df.columns]
     
     if missing_columns:
@@ -335,7 +335,8 @@ def parse_day_trades_file(file):
     # Convert numeric columns to appropriate types
     df['Número Operación'] = pd.to_numeric(df['Número Operación'], errors='coerce')
     df['Monto Activo'] = pd.to_numeric(df['Monto Activo'], errors='coerce')
-    
+    df['Monto Pasivo'] = pd.to_numeric(df['Monto Pasivo'], errors='coerce')
+
     # Map subproduct codes to instrument types
     subproduct_mapping = {
         'Moneda': 'Swap Moneda',
@@ -364,7 +365,7 @@ def parse_day_trades_file(file):
     # Display preview of the parsed data
     st.subheader("Day Trades Preview")
     preview_columns = ['Número Operación', 'Producto', 'Subproducto', 'instrument_type', 
-                     'Moneda Activa', 'Monto Activo']
+                     'Moneda Activa', 'Monto Activo', 'Moneda Pasiva', 'Monto Pasivo']
     st.dataframe(df[preview_columns], use_container_width=True)
     
     return df
@@ -631,12 +632,24 @@ def parse_rules_file(file):
             key_columns['credit_account'] = col
         elif 'cobertura' in col_str:
             key_columns['coverage'] = col
+        elif 'pata' in col_str:  # Added this line to recognize Pata column
+            key_columns['pata'] = col
     
     st.write("Identified rule columns:", key_columns)
     
     # Rename columns to standardized names
     if key_columns:
         df = df.rename(columns={v: k for k, v in key_columns.items()})
+    
+    # Ensure we have the Pata column with proper name
+    if 'pata' in df.columns:
+        df = df.rename(columns={'pata': 'Pata'})
+    elif 'Pata' not in df.columns:
+        # If Pata column is missing, show available columns for debugging
+        st.error("❌ Could not find 'Pata' column in rules file")
+        st.write("Available columns after processing:", df.columns.tolist())
+        st.write("Raw column names from file:", list(df.columns))
+        return pd.DataFrame()
     
     # Map event codes
     if 'event' in df.columns:
@@ -654,6 +667,11 @@ def parse_rules_file(file):
         event_counts = df['event'].value_counts(dropna=False)
         st.write("Event counts in rules:", event_counts.to_dict())
     
+    # Show Pata distribution
+    if 'Pata' in df.columns:
+        pata_counts = df['Pata'].value_counts(dropna=False)
+        st.write("Pata distribution in rules:", pata_counts.to_dict())
+    
     # Handle 'Swap All' by expanding to all swap types
     if 'subproduct' in df.columns:
         expanded_rules = []
@@ -667,6 +685,13 @@ def parse_rules_file(file):
                 expanded_rules.append(rule)
         
         df_expanded = pd.DataFrame(expanded_rules)
+        
+        # Final validation - ensure Pata column exists in expanded dataframe
+        if 'Pata' not in df_expanded.columns:
+            st.error("❌ Pata column missing after expansion")
+            st.write("Columns in expanded dataframe:", df_expanded.columns.tolist())
+            return pd.DataFrame()
+            
         return df_expanded
     
-    return df 
+    return df

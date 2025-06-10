@@ -8,8 +8,8 @@ def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, d
     
     For each day trade, checks that:
     1. Corresponding "Curse" entries exist in the accounting interface
-    2. Correct account numbers are used based on instrument type
-    3. Transaction amounts match the Monto Activo value
+    2. Correct account numbers are used based on instrument type and Pata
+    3. Transaction amounts match the Monto Activo/Pasivo value based on Pata
     4. Amounts are in the correct fields (debe/haber)
     5. The number of entries exactly matches what's expected from rules
     """
@@ -51,11 +51,13 @@ def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, d
             
         instrument_type = trade['instrument_type']
         monto_activo = trade['Monto Activo']
+        monto_pasivo = trade.get('Monto Pasivo', 0)  # Default to 0 if column doesn't exist
         currency = trade['Moneda Activa']
         
         # Display debug info if requested
         if debug_deal is not None:
-            st.write(f"DEBUG: Processing trade {trade_number}, instrument: {instrument_type}, amount: {monto_activo}, currency: {currency}")
+            st.write(f"DEBUG: Processing trade {trade_number}, instrument: {instrument_type}")
+            st.write(f"DEBUG: Monto Activo: {monto_activo}, Monto Pasivo: {monto_pasivo}, Currency: {currency}")
         
         # Get applicable rules for this instrument type
         applicable_rules = inicio_rules[inicio_rules['subproduct'] == instrument_type]
@@ -65,6 +67,7 @@ def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, d
                 'trade_number': str(trade_number),
                 'instrument_type': instrument_type,
                 'monto_activo': monto_activo,
+                'monto_pasivo': monto_pasivo,
                 'currency': currency,
                 'status': 'Missing Rule',
                 'interface_entries': 0,
@@ -72,21 +75,45 @@ def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, d
                 'issue': f'No rule found for {instrument_type}'
             })
             continue
-            
-        # Count how many unique accounts are expected
+        
+        # Separate rules by Pata and build expected accounts
+        activa_rules = applicable_rules[applicable_rules['Pata'] == 'Pata Activa']
+        pasiva_rules = applicable_rules[applicable_rules['Pata'] == 'Pata Pasiva']
+        
+        if debug_deal is not None:
+            st.write(f"DEBUG: Found {len(activa_rules)} Pata Activa rules, {len(pasiva_rules)} Pata Pasiva rules")
+        
+        # Build expected accounts list
         expected_accounts = []
-        for _, rule in applicable_rules.iterrows():
+        expected_amounts = {}  # Dictionary to track which amount each account should use
+        
+        # Process Pata Activa rules
+        for _, rule in activa_rules.iterrows():
             if pd.notna(rule['debit_account']):
-                expected_accounts.append(str(rule['debit_account']))
+                account = str(rule['debit_account'])
+                expected_accounts.append(account)
+                expected_amounts[account] = {'amount': monto_activo, 'pata': 'Activa', 'field': 'debit'}
             if pd.notna(rule['credit_account']):
-                expected_accounts.append(str(rule['credit_account']))
+                account = str(rule['credit_account'])
+                expected_accounts.append(account)
+                expected_amounts[account] = {'amount': monto_activo, 'pata': 'Activa', 'field': 'credit'}
+        
+        # Process Pata Pasiva rules
+        for _, rule in pasiva_rules.iterrows():
+            if pd.notna(rule['debit_account']):
+                account = str(rule['debit_account'])
+                expected_accounts.append(account)
+                expected_amounts[account] = {'amount': monto_pasivo, 'pata': 'Pasiva', 'field': 'debit'}
+            if pd.notna(rule['credit_account']):
+                account = str(rule['credit_account'])
+                expected_accounts.append(account)
+                expected_amounts[account] = {'amount': monto_pasivo, 'pata': 'Pasiva', 'field': 'credit'}
 
         # Remove any "None" values
         expected_accounts = [acc for acc in expected_accounts if acc != "None" and acc != "nan"]
         expected_entry_count = len(expected_accounts)
             
         # Find interface entries for this trade
-        # Filter by trade number and ensure the glosa contains "Curse"
         trade_entries = curse_entries[
             (curse_entries[trade_number_col] == trade_number)
         ]
@@ -95,6 +122,9 @@ def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, d
             st.write(f"Found {len(trade_entries)} entries for trade {trade_number} in interface")
             st.write(f"Expected {expected_entry_count} entries based on rules")
             st.write(f"Expected account numbers: {expected_accounts}")
+            st.write("Expected amounts by account:")
+            for acc, info in expected_amounts.items():
+                st.write(f"  {acc}: {info['amount']} ({info['pata']}, {info['field']})")
             st.dataframe(trade_entries, use_container_width=True, hide_index=True)
         
         if len(trade_entries) == 0:
@@ -102,6 +132,7 @@ def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, d
                 'trade_number': str(trade_number),
                 'instrument_type': instrument_type,
                 'monto_activo': monto_activo,
+                'monto_pasivo': monto_pasivo,
                 'currency': currency,
                 'status': 'Missing Entries',
                 'interface_entries': 0,
@@ -116,6 +147,7 @@ def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, d
                 'trade_number': str(trade_number),
                 'instrument_type': instrument_type,
                 'monto_activo': monto_activo,
+                'monto_pasivo': monto_pasivo,
                 'currency': currency,
                 'status': 'Entry Count Mismatch',
                 'interface_entries': len(trade_entries),
@@ -134,6 +166,7 @@ def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, d
                 'trade_number': str(trade_number),
                 'instrument_type': instrument_type,
                 'monto_activo': monto_activo,
+                'monto_pasivo': monto_pasivo,
                 'currency': currency,
                 'status': 'Missing Accounts',
                 'interface_entries': len(trade_entries),
@@ -147,6 +180,7 @@ def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, d
                 'trade_number': str(trade_number),
                 'instrument_type': instrument_type,
                 'monto_activo': monto_activo,
+                'monto_pasivo': monto_pasivo,
                 'currency': currency,
                 'status': 'Extra Accounts',
                 'interface_entries': len(trade_entries),
@@ -163,42 +197,36 @@ def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, d
         for account in expected_accounts:
             account_entries = trade_entries[trade_entries[account_col].astype(str) == account]
             
-            # Determine if this is a debit or credit account based on rules
-            is_debit_account = any(
-                pd.notna(rule['debit_account']) and str(rule['debit_account']) == account 
-                for _, rule in applicable_rules.iterrows()
-            )
-            
-            is_credit_account = any(
-                pd.notna(rule['credit_account']) and str(rule['credit_account']) == account 
-                for _, rule in applicable_rules.iterrows()
-            )
+            # Get expected amount and field from our mapping
+            expected_info = expected_amounts[account]
+            expected_amount = expected_info['amount']
+            expected_field = expected_info['field']
+            pata_type = expected_info['pata']
             
             # Get the total amount in the expected field
-            if is_debit_account:
-                amount = account_entries[debit_col].sum()
-                expected_field = 'debit'
-            elif is_credit_account:
-                amount = account_entries[credit_col].sum()  
-                expected_field = 'credit'
+            if expected_field == 'debit':
+                actual_amount = account_entries[debit_col].sum()
+            elif expected_field == 'credit':
+                actual_amount = account_entries[credit_col].sum()
             else:
-                amount = 0
-                expected_field = 'unknown'
+                actual_amount = 0
             
             # Check if amount matches the expected value
-            is_matching = abs(amount - monto_activo) < 1.0
+            is_matching = abs(actual_amount - expected_amount) < 1.0
             
             account_validation[account] = {
                 'expected_field': expected_field,
-                'amount': amount,
+                'expected_amount': expected_amount,
+                'actual_amount': actual_amount,
+                'pata': pata_type,
                 'matches': is_matching
             }
             
             if debug_deal is not None:
                 if is_matching:
-                    st.success(f"✓ Account {account} ({expected_field}): Expected {monto_activo}, Found {amount:.2f}")
+                    st.success(f"✓ Account {account} ({expected_field}, {pata_type}): Expected {expected_amount}, Found {actual_amount:.2f}")
                 else:
-                    st.warning(f"✗ Account {account} ({expected_field}): Expected {monto_activo}, Found {amount:.2f}")
+                    st.warning(f"✗ Account {account} ({expected_field}, {pata_type}): Expected {expected_amount}, Found {actual_amount:.2f}")
         
         # Check if all amounts match
         all_match = all(val['matches'] for val in account_validation.values())
@@ -209,7 +237,7 @@ def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, d
         else:
             status = 'Amount Mismatch'
             mismatches = [
-                f"{account} ({val['expected_field']}): Expected {monto_activo}, Found {val['amount']:.2f}"
+                f"{account} ({val['expected_field']}, {val['pata']}): Expected {val['expected_amount']}, Found {val['actual_amount']:.2f}"
                 for account, val in account_validation.items() if not val['matches']
             ]
             issue = f"Amount mismatches: {'; '.join(mismatches)}"
@@ -219,6 +247,7 @@ def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, d
             'trade_number': str(trade_number),
             'instrument_type': instrument_type,
             'monto_activo': monto_activo,
+            'monto_pasivo': monto_pasivo,
             'currency': currency,
             'status': status,
             'interface_entries': len(trade_entries),
@@ -243,6 +272,7 @@ def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, d
         # Display validation results
         st.subheader("Day Trades Validation Results")
         st.write("Validates that trades in the day trades file have corresponding Curse entries in the accounting interface")
+        st.write("Now supports Pata Activa (uses Monto Activo) and Pata Pasiva (uses Monto Pasivo) rules")
         st.dataframe(validation_df, use_container_width=True, hide_index=True)
         
         # Calculate match statistics
