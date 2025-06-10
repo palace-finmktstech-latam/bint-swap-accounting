@@ -53,26 +53,32 @@ def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, d
         monto_activo = trade['Monto Activo']
         monto_pasivo = trade.get('Monto Pasivo', 0)  # Default to 0 if column doesn't exist
         currency = trade['Moneda Activa']
+        cobertura = trade.get('Cobertura', 'No')  # Default to 'No' if column doesn't exist
         
         # Display debug info if requested
         if debug_deal is not None:
             st.write(f"DEBUG: Processing trade {trade_number}, instrument: {instrument_type}")
             st.write(f"DEBUG: Monto Activo: {monto_activo}, Monto Pasivo: {monto_pasivo}, Currency: {currency}")
+            st.write(f"DEBUG: Cobertura: {cobertura}")
         
-        # Get applicable rules for this instrument type
-        applicable_rules = inicio_rules[inicio_rules['subproduct'] == instrument_type]
+        # Get applicable rules for this instrument type AND cobertura
+        applicable_rules = inicio_rules[
+            (inicio_rules['subproduct'] == instrument_type) & 
+            (inicio_rules['coverage'] == cobertura)
+        ]
         
         if len(applicable_rules) == 0:
             validation_results.append({
                 'trade_number': str(trade_number),
                 'instrument_type': instrument_type,
+                'cobertura': cobertura,
                 'monto_activo': monto_activo,
                 'monto_pasivo': monto_pasivo,
                 'currency': currency,
                 'status': 'Missing Rule',
                 'interface_entries': 0,
                 'expected_entries': 0,
-                'issue': f'No rule found for {instrument_type}'
+                'issue': f'No rule found for {instrument_type} with Cobertura={cobertura}'
             })
             continue
         
@@ -81,7 +87,9 @@ def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, d
         pasiva_rules = applicable_rules[applicable_rules['Pata'] == 'Pata Pasiva']
         
         if debug_deal is not None:
-            st.write(f"DEBUG: Found {len(activa_rules)} Pata Activa rules, {len(pasiva_rules)} Pata Pasiva rules")
+            st.write(f"Found {len(activa_rules)} Pata Activa rules, {len(pasiva_rules)} Pata Pasiva rules")
+            st.write(f"All applicable rules for {instrument_type} with Cobertura={cobertura}:")
+            st.dataframe(applicable_rules, use_container_width=True, hide_index=True)
         
         # Build expected accounts list
         expected_accounts = []
@@ -131,6 +139,7 @@ def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, d
             validation_results.append({
                 'trade_number': str(trade_number),
                 'instrument_type': instrument_type,
+                'cobertura': cobertura,
                 'monto_activo': monto_activo,
                 'monto_pasivo': monto_pasivo,
                 'currency': currency,
@@ -146,6 +155,7 @@ def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, d
             validation_results.append({
                 'trade_number': str(trade_number),
                 'instrument_type': instrument_type,
+                'cobertura': cobertura,
                 'monto_activo': monto_activo,
                 'monto_pasivo': monto_pasivo,
                 'currency': currency,
@@ -165,6 +175,7 @@ def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, d
             validation_results.append({
                 'trade_number': str(trade_number),
                 'instrument_type': instrument_type,
+                'cobertura': cobertura,
                 'monto_activo': monto_activo,
                 'monto_pasivo': monto_pasivo,
                 'currency': currency,
@@ -179,6 +190,7 @@ def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, d
             validation_results.append({
                 'trade_number': str(trade_number),
                 'instrument_type': instrument_type,
+                'cobertura': cobertura,
                 'monto_activo': monto_activo,
                 'monto_pasivo': monto_pasivo,
                 'currency': currency,
@@ -191,7 +203,6 @@ def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, d
         
         # At this point we have the right number of entries with the right accounts
         # Now check the amounts in each entry
-        
         # Create a dictionary to track amount validation for each account
         account_validation = {}
         for account in expected_accounts:
@@ -202,7 +213,7 @@ def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, d
             expected_amount = expected_info['amount']
             expected_field = expected_info['field']
             pata_type = expected_info['pata']
-            
+
             # Get the total amount in the expected field
             if expected_field == 'debit':
                 actual_amount = account_entries[debit_col].sum()
@@ -246,6 +257,7 @@ def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, d
         validation_results.append({
             'trade_number': str(trade_number),
             'instrument_type': instrument_type,
+            'cobertura': cobertura,
             'monto_activo': monto_activo,
             'monto_pasivo': monto_pasivo,
             'currency': currency,
@@ -272,7 +284,6 @@ def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, d
         # Display validation results
         st.subheader("Day Trades Validation Results")
         st.write("Validates that trades in the day trades file have corresponding Curse entries in the accounting interface")
-        st.write("Now supports Pata Activa (uses Monto Activo) and Pata Pasiva (uses Monto Pasivo) rules")
         st.dataframe(validation_df, use_container_width=True, hide_index=True)
         
         # Calculate match statistics

@@ -325,7 +325,7 @@ def parse_day_trades_file(file):
     st.write("Day trades file columns:", df.columns.tolist())
     
     # Check if the required columns exist
-    required_columns = ['Número Operación', 'Producto', 'Subproducto', 'Moneda Activa', 'Monto Activo', 'Moneda Pasiva', 'Monto Pasivo']
+    required_columns = ['Número Operación', 'Producto', 'Subproducto', 'Moneda Activa', 'Monto Activo', 'Moneda Pasiva', 'Monto Pasivo', 'Cobertura']
     missing_columns = [col for col in required_columns if col not in df.columns]
     
     if missing_columns:
@@ -341,7 +341,7 @@ def parse_day_trades_file(file):
     subproduct_mapping = {
         'Moneda': 'Swap Moneda',
         'Tasa': 'Swap Tasa',
-        'Cámara': 'Swap ICP'
+        'Cámara': 'Swap Cámara'
     }
     
     # Create instrument_type column based on Subproducto
@@ -364,7 +364,7 @@ def parse_day_trades_file(file):
     
     # Display preview of the parsed data
     st.subheader("Day Trades Preview")
-    preview_columns = ['Número Operación', 'Producto', 'Subproducto', 'instrument_type', 
+    preview_columns = ['Número Operación', 'Producto', 'Subproducto', 'instrument_type', 'Cobertura',
                      'Moneda Activa', 'Monto Activo', 'Moneda Pasiva', 'Monto Pasivo']
     st.dataframe(df[preview_columns], use_container_width=True)
     
