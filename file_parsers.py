@@ -78,13 +78,16 @@ def parse_interface_file(file):
         # Convert to string to ensure extraction works
         df[glosa_col] = df[glosa_col].astype(str)
         
-        # Extract event type
+        # Extract event type - Updated to handle both VENCIMIENTO and TERMINO
         df['event_type'] = df[glosa_col].apply(lambda x: 
             'Valorización MTM' if 'Valorización' in x or 'MTM' in x 
             else ('Curse' if 'Curse' in x 
-            else ('Vcto' if 'Vcto' in x 
+            else ('Vcto' if 'Vcto' in x or 'Vencimiento' in x  # Both VENCIMIENTO and TERMINO use Vcto/Vencimiento glosa
             else ('Reversa Valorización MTM' if 'Reversa' in x or 'Reverso' in x 
             else None))))
+        
+        # Note: TERMINO entries will also be classified as 'Vcto' since they share the same glosa
+        # The validation logic will separate them by matching against different rule accounts
         
         # Extract instrument type
         df['instrument_type'] = df[glosa_col].apply(lambda x: 
@@ -112,6 +115,11 @@ def parse_interface_file(file):
         st.write("Event type counts:", event_counts.to_dict())
         st.write("Instrument type counts:", instrument_counts.to_dict())
         st.write("Currency pair counts:", currency_counts.to_dict())
+        
+        # Show additional info about Vcto entries
+        vcto_count = len(df[df['event_type'] == 'Vcto'])
+        if vcto_count > 0:
+            st.info(f"ℹ️ Found {vcto_count} 'Vcto' entries (includes both VENCIMIENTO and TERMINO entries)")
     
     return df, key_columns
 
@@ -418,7 +426,7 @@ def parse_expiries_file(file):
         required_columns = [
             'Número Operación', 'Fecha Vencimiento', 'Fecha Pago Capital', 
             'Fecha Pago Interés', 'Moneda Liquidación', 
-            'Monto Override Extranjero', 'Monto Override Local'
+            'Monto Override Extranjero', 'Monto Override Local', 'Amortización Activa', 'Amortización Pasiva'
         ]
         
         missing_columns = [col for col in required_columns if col not in df.columns]
@@ -455,6 +463,8 @@ def parse_expiries_file(file):
         df['Número Operación'] = pd.to_numeric(df['Número Operación'], errors='coerce')
         df['Monto Override Extranjero'] = pd.to_numeric(df['Monto Override Extranjero'], errors='coerce')
         df['Monto Override Local'] = pd.to_numeric(df['Monto Override Local'], errors='coerce')
+        df['Amortización Activa'] = pd.to_numeric(df['Amortización Activa'], errors='coerce')
+        df['Amortización Pasiva'] = pd.to_numeric(df['Amortización Pasiva'], errors='coerce')
         
         # Map product names to standard instrument types
         if 'Producto' in df.columns:
@@ -656,8 +666,10 @@ def parse_rules_file(file):
         event_mapping = {
             'INICIO': 'Curse',
             'VALORIZACION': 'Valorización MTM',
-            'VENCIMIENTO': 'Vcto',
-            'TERMINO': 'Vcto',
+            #'VENCIMIENTO': 'Vcto',
+            'VENCIMIENTO': 'Vencimiento',
+            #'TERMINO': 'Vcto',
+            'TERMINO': 'Termino',
             'REVERSA_VALORIZACION': 'Reversa Valorización MTM'
         }
         df['event'] = df['event'].map(event_mapping)

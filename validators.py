@@ -651,40 +651,58 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
 
 def validate_vencimiento_entries(expiries_df, interface_df, interface_cols, rules_df, debug_deal=None):
     """
-    Validate VENCIMIENTO (expiry) entries against accounting interface entries.
+    Validate both VENCIMIENTO and TERMINO entries against accounting interface entries.
     
-    For each expiring trade, checks that:
-    1. Corresponding "Vcto" entries exist in the accounting interface
-    2. Correct account numbers are used based on instrument type, coverage, and direction
-    3. Transaction amounts match expected values based on Pata (Monto Override values)
-    4. Amounts are in the correct fields (debe/haber)
-    5. The number of entries exactly matches what's expected from rules
+    VENCIMIENTO: Validates expiry entries using Monto Override amounts
+    TERMINO: Validates capital amortization entries using Amortización amounts with Pata logic
+    
+    Both validations run together since they're part of the same business process.
+    """
+    st.header("🔄 VENCIMIENTO & TERMINO Validation")
+    
+    # Run VENCIMIENTO validation first
+    st.subheader("📅 VENCIMIENTO Validation")
+    vencimiento_results = _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_df, debug_deal)
+    
+    # Run TERMINO validation second  
+    st.subheader("🔚 TERMINO Validation")
+    termino_results = _validate_termino_only(expiries_df, interface_df, interface_cols, rules_df, debug_deal)
+    
+    # Return both results (you could combine them if needed)
+    return {
+        'vencimiento': vencimiento_results,
+        'termino': termino_results
+    }
+
+def _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_df, debug_deal=None):
+    """
+    Validate VENCIMIENTO (expiry) entries - the payment/settlement part.
+    Uses Monto Override Extranjero/Local amounts.
     """
     # Filter rules for VENCIMIENTO event
-    vencimiento_rules = rules_df[rules_df['event'] == 'Vcto'].copy()
-    #vencimiento_rules = rules_df[rules_df['event'] == 'VENCIMIENTO'].copy()
+    vencimiento_rules = rules_df[rules_df['event'] == 'Vencimiento'].copy()
     
     if len(vencimiento_rules) == 0:
-        st.error("No VENCIMIENTO/Vcto rules found in rules file")
+        st.error("No VENCIMIENTO rules found in rules file")
         return pd.DataFrame()
     
-    st.subheader("VENCIMIENTO/Vcto Rules")
-    st.dataframe(vencimiento_rules, use_container_width=True, hide_index=True)
+    st.write(f"Found {len(vencimiento_rules)} VENCIMIENTO rules")
+    if debug_deal is not None:
+        st.dataframe(vencimiento_rules, use_container_width=True, hide_index=True)
     
     # Extract needed columns from interface
     trade_number_col = next((col for col in interface_df.columns if any(x in str(col).lower() for x in ['operación', 'operacion', 'nro.'])), None)
     debit_col = interface_cols['debit']
     credit_col = interface_cols['credit']
     account_col = interface_cols['account']
-    glosa_col = interface_cols['glosa']
     
     if not trade_number_col:
         st.error("Could not find trade number column in interface file")
         return pd.DataFrame()
     
-    # Filter interface for "Vcto" event_type entries
+    # Filter interface for "Vcto" event_type entries (both VENCIMIENTO and TERMINO share this)
     vcto_entries = interface_df[interface_df['event_type'] == 'Vcto'].copy()
-    st.write(f"Found {len(vcto_entries)} Vcto entries in interface file")
+    st.write(f"Found {len(vcto_entries)} Vcto entries in interface file (shared by VENCIMIENTO and TERMINO)")
     
     # Ensure numeric values
     vcto_entries[debit_col] = pd.to_numeric(vcto_entries[debit_col], errors='coerce').fillna(0)
@@ -693,12 +711,7 @@ def validate_vencimiento_entries(expiries_df, interface_df, interface_cols, rule
     # Prepare validation results
     validation_results = []
     
-    # Process all trades in the expiries file (no date filtering)
-    st.write(f"Processing {len(expiries_df)} trades from expiries file")
-    
-    if len(expiries_df) == 0:
-        st.warning("No trades found in expiries file")
-        return pd.DataFrame()
+    st.write(f"Processing {len(expiries_df)} trades for VENCIMIENTO validation")
     
     # Process each expiring trade
     for _, expiry in expiries_df.iterrows():
@@ -711,43 +724,51 @@ def validate_vencimiento_entries(expiries_df, interface_df, interface_cols, rule
         instrument_type = expiry.get('instrument_type', 'Unknown')
         settlement_currency = expiry.get('Moneda Liquidación', 'Unknown')
         
-        # Get the override amounts (these are our expected amounts based on Pata)
+        # Get the override amounts and handle NaN/null values
         monto_extranjero = expiry.get('Monto Override Extranjero', 0)
         monto_local = expiry.get('Monto Override Local', 0)
         
-        # Hardcode Cobertura to 'No' for now (but keep the filtering logic)
+        # Handle NaN/NaT values
+        if pd.isna(monto_extranjero):
+            monto_extranjero = 0
+        if pd.isna(monto_local):
+            monto_local = 0
+        
+        # Convert to numeric
+        try:
+            monto_extranjero = float(monto_extranjero)
+        except (ValueError, TypeError):
+            monto_extranjero = 0
+            
+        try:
+            monto_local = float(monto_local)
+        except (ValueError, TypeError):
+            monto_local = 0
+        
+        # Hardcode Cobertura to 'No' for now
         cobertura = 'No'
         
-        # Determine direction based on the sign of the override amounts
-        # Either extranjero OR local will have a value, not both
+        # Determine direction and amount
         if monto_extranjero != 0:
             direction = 'Positivo' if monto_extranjero > 0 else 'Negativo'
-        elif monto_local != 0:
-            direction = 'Positivo' if monto_local > 0 else 'Negativo'
-        else:
-            direction = 'Positivo'  # Default when both are zero
-        
-        # Calculate amount_to_use BEFORE the debug output
-        # Use whichever override amount is non-zero
-        if monto_extranjero != 0:
             amount_to_use = abs(monto_extranjero)
             amount_source = 'Extranjero'
         elif monto_local != 0:
+            direction = 'Positivo' if monto_local > 0 else 'Negativo'
             amount_to_use = abs(monto_local)
             amount_source = 'Local'
         else:
-            amount_to_use = 0  # Both are zero
-            amount_source = 'None (both zero)'
+            direction = 'Positivo'
+            amount_to_use = 0
+            amount_source = 'None'
         
         # Display debug info if requested
         if debug_deal is not None:
-            st.write(f"DEBUG: Processing expiry {trade_number}, instrument: {instrument_type}")
-            st.write(f"DEBUG: Monto Extranjero: {monto_extranjero}, Monto Local: {monto_local}")
-            st.write(f"DEBUG: Settlement Currency: {settlement_currency}, Cobertura: {cobertura}")
-            st.write(f"DEBUG: Direction: {direction}")
-            st.write(f"DEBUG: Using amount: {amount_to_use} (from {amount_source})")
+            st.write(f"DEBUG VENCIMIENTO: Processing expiry {trade_number}, instrument: {instrument_type}")
+            st.write(f"DEBUG VENCIMIENTO: Monto Extranjero: {monto_extranjero}, Monto Local: {monto_local}")
+            st.write(f"DEBUG VENCIMIENTO: Direction: {direction}, Using amount: {amount_to_use} (from {amount_source})")
         
-        # Get applicable rules for this instrument type, coverage, and direction
+        # Get applicable rules
         applicable_rules = vencimiento_rules[
             (vencimiento_rules['subproduct'] == instrument_type) & 
             (vencimiento_rules['coverage'] == cobertura) &
@@ -758,191 +779,353 @@ def validate_vencimiento_entries(expiries_df, interface_df, interface_cols, rule
             validation_results.append({
                 'trade_number': str(trade_number),
                 'instrument_type': instrument_type,
+                'validation_type': 'VENCIMIENTO',
                 'cobertura': cobertura,
                 'direction': direction,
-                'monto_extranjero': monto_extranjero,
-                'monto_local': monto_local,
-                'settlement_currency': settlement_currency,
+                'amount_used': amount_to_use,
+                'amount_source': amount_source,
                 'status': 'Missing Rule',
                 'interface_entries': 0,
                 'expected_entries': 0,
-                'issue': f'No rule found for {instrument_type} with Cobertura={cobertura}, Direction={direction}'
+                'issue': f'No VENCIMIENTO rule found for {instrument_type} with Cobertura={cobertura}, Direction={direction}'
             })
             continue
         
-        # Build expected accounts list from all applicable rules
+        # Build expected accounts (simple logic - no Pata for VENCIMIENTO)
         expected_accounts = []
-        expected_amounts = {}  # Dictionary to track which amount each account should use
+        expected_amounts = {}
         
-        # Process all applicable rules
         for _, rule in applicable_rules.iterrows():
-            # Add debit account if present
             if pd.notna(rule['debit_account']):
                 account = str(rule['debit_account'])
                 expected_accounts.append(account)
                 expected_amounts[account] = {'amount': amount_to_use, 'field': 'debit'}
             
-            # Add credit account if present
             if pd.notna(rule['credit_account']):
                 account = str(rule['credit_account'])
                 expected_accounts.append(account)
                 expected_amounts[account] = {'amount': amount_to_use, 'field': 'credit'}
 
-        # Remove any "None" values
         expected_accounts = [acc for acc in expected_accounts if acc != "None" and acc != "nan"]
         expected_entry_count = len(expected_accounts)
-            
+        
         # Find interface entries for this trade
-        trade_entries = vcto_entries[
-            (vcto_entries[trade_number_col] == trade_number)
-        ]
+        trade_entries = vcto_entries[vcto_entries[trade_number_col] == trade_number]
+        
+        # Filter to only entries that match our expected accounts (to separate VENCIMIENTO from TERMINO)
+        if len(expected_accounts) > 0:
+            vencimiento_entries = trade_entries[trade_entries[account_col].astype(str).isin(expected_accounts)]
+        else:
+            vencimiento_entries = pd.DataFrame()
         
         if debug_deal is not None:
-            st.write(f"Found {len(trade_entries)} entries for trade {trade_number} in interface")
-            st.write(f"Expected {expected_entry_count} entries based on rules")
-            st.write(f"Expected account numbers: {expected_accounts}")
-            st.write("Expected amounts by account:")
-            for acc, info in expected_amounts.items():
-                st.write(f"  {acc}: {info['amount']} ({info['field']})")
-            if len(trade_entries) > 0:
-                st.dataframe(trade_entries, use_container_width=True, hide_index=True)
+            st.write(f"DEBUG VENCIMIENTO: Found {len(vencimiento_entries)} VENCIMIENTO entries for trade {trade_number}")
+            st.write(f"DEBUG VENCIMIENTO: Expected {expected_entry_count} entries, Expected accounts: {expected_accounts}")
+            if len(vencimiento_entries) > 0:
+                st.dataframe(vencimiento_entries, use_container_width=True, hide_index=True)
         
-        if len(trade_entries) == 0:
-            validation_results.append({
-                'trade_number': str(trade_number),
-                'instrument_type': instrument_type,
-                'cobertura': cobertura,
-                'direction': direction,
-                'monto_extranjero': monto_extranjero,
-                'monto_local': monto_local,
-                'settlement_currency': settlement_currency,
-                'status': 'Missing Entries',
-                'interface_entries': 0,
-                'expected_entries': expected_entry_count,
-                'issue': f'No Vcto entries found in interface for trade {trade_number}'
-            })
-            continue
+        # Validation logic (similar to previous implementation)
+        status, issue = _validate_entries_against_expected(
+            vencimiento_entries, expected_accounts, expected_amounts, 
+            account_col, debit_col, credit_col, debug_deal, "VENCIMIENTO"
+        )
         
-        # Check if we found exactly the right number of entries
-        if len(trade_entries) != expected_entry_count:
-            validation_results.append({
-                'trade_number': str(trade_number),
-                'instrument_type': instrument_type,
-                'cobertura': cobertura,
-                'direction': direction,
-                'monto_extranjero': monto_extranjero,
-                'monto_local': monto_local,
-                'settlement_currency': settlement_currency,
-                'status': 'Entry Count Mismatch',
-                'interface_entries': len(trade_entries),
-                'expected_entries': expected_entry_count,
-                'issue': f'Expected {expected_entry_count} entries, found {len(trade_entries)}'
-            })
-            continue
-            
-        # Check if each expected account is present
-        found_accounts = trade_entries[account_col].astype(str).unique().tolist()
-        missing_accounts = [acc for acc in expected_accounts if acc not in found_accounts]
-        extra_accounts = [acc for acc in found_accounts if acc not in expected_accounts]
-
-        if missing_accounts:
-            validation_results.append({
-                'trade_number': str(trade_number),
-                'instrument_type': instrument_type,
-                'cobertura': cobertura,
-                'direction': direction,
-                'monto_extranjero': monto_extranjero,
-                'monto_local': monto_local,
-                'settlement_currency': settlement_currency,
-                'status': 'Missing Accounts',
-                'interface_entries': len(trade_entries),
-                'expected_entries': expected_entry_count,
-                'issue': f'Missing expected accounts: {", ".join(missing_accounts)}'
-            })
-            continue
-
-        if extra_accounts:
-            validation_results.append({
-                'trade_number': str(trade_number),
-                'instrument_type': instrument_type,
-                'cobertura': cobertura,
-                'direction': direction,
-                'monto_extranjero': monto_extranjero,
-                'monto_local': monto_local,
-                'settlement_currency': settlement_currency,
-                'status': 'Extra Accounts',
-                'interface_entries': len(trade_entries),
-                'expected_entries': expected_entry_count,
-                'issue': f'Found unexpected accounts: {", ".join(extra_accounts)}'
-            })
-            continue
-        
-        # At this point we have the right number of entries with the right accounts
-        # Now check the amounts in each entry
-        
-        # Create a dictionary to track amount validation for each account
-        account_validation = {}
-        for account in expected_accounts:
-            account_entries = trade_entries[trade_entries[account_col].astype(str) == account]
-            
-            # Get expected amount and field from our mapping
-            expected_amount = expected_amounts[account]['amount']
-            expected_field = expected_amounts[account]['field']
-
-            # Get the total amount in the expected field
-            if expected_field == 'debit':
-                actual_amount = account_entries[debit_col].sum()
-            elif expected_field == 'credit':
-                actual_amount = account_entries[credit_col].sum()
-            else:
-                actual_amount = 0
-            
-            # Check if amount matches the expected value
-            is_matching = abs(actual_amount - expected_amount) < 1.0
-            
-            account_validation[account] = {
-                'expected_field': expected_field,
-                'expected_amount': expected_amount,
-                'actual_amount': actual_amount,
-                'matches': is_matching
-            }
-            
-            if debug_deal is not None:
-                if is_matching:
-                    st.success(f"✓ Account {account} ({expected_field}): Expected {expected_amount}, Found {actual_amount:.2f}")
-                else:
-                    st.warning(f"✗ Account {account} ({expected_field}): Expected {expected_amount}, Found {actual_amount:.2f}")
-        
-        # Check if all amounts match
-        all_match = all(val['matches'] for val in account_validation.values())
-        
-        if all_match:
-            status = 'Full Match'
-            issue = ''
-        else:
-            status = 'Amount Mismatch'
-            mismatches = [
-                f"{account} ({val['expected_field']}): Expected {val['expected_amount']}, Found {val['actual_amount']:.2f}"
-                for account, val in account_validation.items() if not val['matches']
-            ]
-            issue = f"Amount mismatches: {'; '.join(mismatches)}"
-        
-        # Add to results
         validation_results.append({
             'trade_number': str(trade_number),
             'instrument_type': instrument_type,
+            'validation_type': 'VENCIMIENTO',
             'cobertura': cobertura,
             'direction': direction,
-            'monto_extranjero': monto_extranjero,
-            'monto_local': monto_local,
-            'settlement_currency': settlement_currency,
+            'amount_used': amount_to_use,
+            'amount_source': amount_source,
             'status': status,
-            'interface_entries': len(trade_entries),
+            'interface_entries': len(vencimiento_entries),
             'expected_entries': expected_entry_count,
             'issue': issue
         })
     
-    # Create validation results dataframe
+    # Display results
+    return _display_validation_results(validation_results, "VENCIMIENTO")
+
+def _validate_termino_only(expiries_df, interface_df, interface_cols, rules_df, debug_deal=None):
+    """
+    Validate TERMINO (capital amortization) entries - the unwinding part.
+    Uses Amortización Activa/Pasiva amounts with Pata-based logic.
+    """
+    # Filter rules for TERMINO event
+    termino_rules = rules_df[rules_df['event'] == 'Termino'].copy()
+    
+    if len(termino_rules) == 0:
+        st.error("No TERMINO rules found in rules file")
+        return pd.DataFrame()
+    
+    st.write(f"Found {len(termino_rules)} TERMINO rules")
+    if debug_deal is not None:
+        st.dataframe(termino_rules, use_container_width=True, hide_index=True)
+    
+    # Extract needed columns from interface
+    trade_number_col = next((col for col in interface_df.columns if any(x in str(col).lower() for x in ['operación', 'operacion', 'nro.'])), None)
+    debit_col = interface_cols['debit']
+    credit_col = interface_cols['credit']
+    account_col = interface_cols['account']
+    
+    # Use the same Vcto entries as VENCIMIENTO (they share the same glosa)
+    vcto_entries = interface_df[interface_df['event_type'] == 'Vcto'].copy()
+    vcto_entries[debit_col] = pd.to_numeric(vcto_entries[debit_col], errors='coerce').fillna(0)
+    vcto_entries[credit_col] = pd.to_numeric(vcto_entries[credit_col], errors='coerce').fillna(0)
+    
+    validation_results = []
+    
+    processed_count = 0
+    skipped_count = 0
+    
+    # Process each expiring trade
+    for _, expiry in expiries_df.iterrows():
+        trade_number = expiry['Número Operación']
+        
+        # Skip if not the debug deal (when in debug mode)
+        if debug_deal is not None and str(trade_number) != str(debug_deal):
+            continue
+            
+        instrument_type = expiry.get('instrument_type', 'Unknown')
+        
+        # Get amortization amounts and handle NaN/null values
+        amort_activa = expiry.get('Amortización Activa', 0)
+        amort_pasiva = expiry.get('Amortización Pasiva', 0)
+        
+        # Handle NaN/null values
+        if pd.isna(amort_activa):
+            amort_activa = 0
+        if pd.isna(amort_pasiva):
+            amort_pasiva = 0
+        
+        # Convert to numeric
+        try:
+            amort_activa = float(amort_activa)
+        except (ValueError, TypeError):
+            amort_activa = 0
+            
+        try:
+            amort_pasiva = float(amort_pasiva)
+        except (ValueError, TypeError):
+            amort_pasiva = 0
+        
+        # Skip if both amortization amounts are zero (no capital amortization)
+        if amort_activa == 0 and amort_pasiva == 0:
+            skipped_count += 1
+            if debug_deal is not None:
+                st.write(f"DEBUG TERMINO: Skipping trade {trade_number} - no amortization amounts")
+            continue
+        
+        processed_count += 1
+        
+        # Hardcode Cobertura to 'No' for now
+        cobertura = 'No'
+        
+        # Display debug info if requested
+        if debug_deal is not None:
+            st.write(f"DEBUG TERMINO: Processing expiry {trade_number}, instrument: {instrument_type}")
+            st.write(f"DEBUG TERMINO: Amortización Activa: {amort_activa}, Amortización Pasiva: {amort_pasiva}")
+        
+        # Get applicable rules (no direction filter for TERMINO - it reverses INICIO)
+        applicable_rules = termino_rules[
+            (termino_rules['subproduct'] == instrument_type) & 
+            (termino_rules['coverage'] == cobertura)
+        ]
+        
+        if len(applicable_rules) == 0:
+            validation_results.append({
+                'trade_number': str(trade_number),
+                'instrument_type': instrument_type,
+                'validation_type': 'TERMINO',
+                'cobertura': cobertura,
+                'amort_activa': amort_activa,
+                'amort_pasiva': amort_pasiva,
+                'status': 'Missing Rule',
+                'interface_entries': 0,
+                'expected_entries': 0,
+                'issue': f'No TERMINO rule found for {instrument_type} with Cobertura={cobertura}'
+            })
+            continue
+        
+        # Apply Pata-based logic (like Day Trades)
+        activa_rules = applicable_rules[applicable_rules['Pata'] == 'Pata Activa']
+        pasiva_rules = applicable_rules[applicable_rules['Pata'] == 'Pata Pasiva']
+        
+        if debug_deal is not None:
+            st.write(f"DEBUG TERMINO: Found {len(activa_rules)} Pata Activa rules, {len(pasiva_rules)} Pata Pasiva rules")
+        
+        # Build expected accounts with Pata-based amounts
+        expected_accounts = []
+        expected_amounts = {}
+        
+        # Process Pata Activa rules (use Amortización Activa)
+        for _, rule in activa_rules.iterrows():
+            if pd.notna(rule['debit_account']):
+                account = str(rule['debit_account'])
+                expected_accounts.append(account)
+                expected_amounts[account] = {'amount': abs(amort_activa), 'pata': 'Activa', 'field': 'debit'}
+            if pd.notna(rule['credit_account']):
+                account = str(rule['credit_account'])
+                expected_accounts.append(account)
+                expected_amounts[account] = {'amount': abs(amort_activa), 'pata': 'Activa', 'field': 'credit'}
+        
+        # Process Pata Pasiva rules (use Amortización Pasiva)
+        for _, rule in pasiva_rules.iterrows():
+            if pd.notna(rule['debit_account']):
+                account = str(rule['debit_account'])
+                expected_accounts.append(account)
+                expected_amounts[account] = {'amount': abs(amort_pasiva), 'pata': 'Pasiva', 'field': 'debit'}
+            if pd.notna(rule['credit_account']):
+                account = str(rule['credit_account'])
+                expected_accounts.append(account)
+                expected_amounts[account] = {'amount': abs(amort_pasiva), 'pata': 'Pasiva', 'field': 'credit'}
+
+        expected_accounts = [acc for acc in expected_accounts if acc != "None" and acc != "nan"]
+        expected_entry_count = len(expected_accounts)
+        
+        # Find interface entries for this trade
+        trade_entries = vcto_entries[vcto_entries[trade_number_col] == trade_number]
+        
+        # Filter to only entries that match our expected accounts (to separate TERMINO from VENCIMIENTO)
+        if len(expected_accounts) > 0:
+            termino_entries = trade_entries[trade_entries[account_col].astype(str).isin(expected_accounts)]
+        else:
+            termino_entries = pd.DataFrame()
+        
+        if debug_deal is not None:
+            st.write(f"DEBUG TERMINO: Found {len(termino_entries)} TERMINO entries for trade {trade_number}")
+            st.write(f"DEBUG TERMINO: Expected {expected_entry_count} entries, Expected accounts: {expected_accounts}")
+            if len(termino_entries) > 0:
+                st.dataframe(termino_entries, use_container_width=True, hide_index=True)
+        
+        # Validation logic with Pata-aware amounts
+        status, issue = _validate_entries_against_expected_with_pata(
+            termino_entries, expected_accounts, expected_amounts, 
+            account_col, debit_col, credit_col, debug_deal, "TERMINO"
+        )
+        
+        validation_results.append({
+            'trade_number': str(trade_number),
+            'instrument_type': instrument_type,
+            'validation_type': 'TERMINO',
+            'cobertura': cobertura,
+            'amort_activa': amort_activa,
+            'amort_pasiva': amort_pasiva,
+            'status': status,
+            'interface_entries': len(termino_entries),
+            'expected_entries': expected_entry_count,
+            'issue': issue
+        })
+    
+    st.write(f"TERMINO Processing Summary: {processed_count} trades processed, {skipped_count} trades skipped (no amortization)")
+    
+    # Display results
+    return _display_validation_results(validation_results, "TERMINO")
+
+def _validate_entries_against_expected(entries_df, expected_accounts, expected_amounts, 
+                                     account_col, debit_col, credit_col, debug_deal, validation_type):
+    """Helper function for simple validation (VENCIMIENTO)"""
+    if len(entries_df) == 0:
+        return 'Missing Entries', f'No {validation_type} entries found in interface'
+    
+    expected_entry_count = len(expected_accounts)
+    if len(entries_df) != expected_entry_count:
+        return 'Entry Count Mismatch', f'Expected {expected_entry_count} entries, found {len(entries_df)}'
+    
+    # Check accounts
+    found_accounts = entries_df[account_col].astype(str).unique().tolist()
+    missing_accounts = [acc for acc in expected_accounts if acc not in found_accounts]
+    extra_accounts = [acc for acc in found_accounts if acc not in expected_accounts]
+    
+    if missing_accounts:
+        return 'Missing Accounts', f'Missing expected accounts: {", ".join(missing_accounts)}'
+    if extra_accounts:
+        return 'Extra Accounts', f'Found unexpected accounts: {", ".join(extra_accounts)}'
+    
+    # Check amounts
+    all_match = True
+    mismatches = []
+    
+    for account in expected_accounts:
+        account_entries = entries_df[entries_df[account_col].astype(str) == account]
+        expected_amount = expected_amounts[account]['amount']
+        expected_field = expected_amounts[account]['field']
+        
+        if expected_field == 'debit':
+            actual_amount = account_entries[debit_col].sum()
+        else:
+            actual_amount = account_entries[credit_col].sum()
+        
+        is_matching = abs(actual_amount - expected_amount) < 1.0
+        if not is_matching:
+            all_match = False
+            mismatches.append(f"{account} ({expected_field}): Expected {expected_amount}, Found {actual_amount:.2f}")
+        
+        if debug_deal is not None:
+            if is_matching:
+                st.success(f"✓ {validation_type} Account {account} ({expected_field}): Expected {expected_amount}, Found {actual_amount:.2f}")
+            else:
+                st.warning(f"✗ {validation_type} Account {account} ({expected_field}): Expected {expected_amount}, Found {actual_amount:.2f}")
+    
+    if all_match:
+        return 'Full Match', ''
+    else:
+        return 'Amount Mismatch', f"Amount mismatches: {'; '.join(mismatches)}"
+
+def _validate_entries_against_expected_with_pata(entries_df, expected_accounts, expected_amounts, 
+                                               account_col, debit_col, credit_col, debug_deal, validation_type):
+    """Helper function for Pata-aware validation (TERMINO)"""
+    if len(entries_df) == 0:
+        return 'Missing Entries', f'No {validation_type} entries found in interface'
+    
+    expected_entry_count = len(expected_accounts)
+    if len(entries_df) != expected_entry_count:
+        return 'Entry Count Mismatch', f'Expected {expected_entry_count} entries, found {len(entries_df)}'
+    
+    # Check accounts
+    found_accounts = entries_df[account_col].astype(str).unique().tolist()
+    missing_accounts = [acc for acc in expected_accounts if acc not in found_accounts]
+    extra_accounts = [acc for acc in found_accounts if acc not in expected_accounts]
+    
+    if missing_accounts:
+        return 'Missing Accounts', f'Missing expected accounts: {", ".join(missing_accounts)}'
+    if extra_accounts:
+        return 'Extra Accounts', f'Found unexpected accounts: {", ".join(extra_accounts)}'
+    
+    # Check amounts with Pata awareness
+    all_match = True
+    mismatches = []
+    
+    for account in expected_accounts:
+        account_entries = entries_df[entries_df[account_col].astype(str) == account]
+        expected_amount = expected_amounts[account]['amount']
+        expected_field = expected_amounts[account]['field']
+        pata_type = expected_amounts[account]['pata']
+        
+        if expected_field == 'debit':
+            actual_amount = account_entries[debit_col].sum()
+        else:
+            actual_amount = account_entries[credit_col].sum()
+        
+        is_matching = abs(actual_amount - expected_amount) < 1.0
+        if not is_matching:
+            all_match = False
+            mismatches.append(f"{account} ({expected_field}, {pata_type}): Expected {expected_amount}, Found {actual_amount:.2f}")
+        
+        if debug_deal is not None:
+            if is_matching:
+                st.success(f"✓ {validation_type} Account {account} ({expected_field}, {pata_type}): Expected {expected_amount}, Found {actual_amount:.2f}")
+            else:
+                st.warning(f"✗ {validation_type} Account {account} ({expected_field}, {pata_type}): Expected {expected_amount}, Found {actual_amount:.2f}")
+    
+    if all_match:
+        return 'Full Match', ''
+    else:
+        return 'Amount Mismatch', f"Amount mismatches: {'; '.join(mismatches)}"
+
+def _display_validation_results(validation_results, validation_type):
+    """Helper function to display validation results"""
     validation_df = pd.DataFrame(validation_results)
     
     if len(validation_df) > 0:
@@ -957,8 +1140,12 @@ def validate_vencimiento_entries(expiries_df, interface_df, interface_cols, rule
             validation_df[col] = validation_df[col].round(2)
         
         # Display validation results
-        st.subheader("VENCIMIENTO Validation Results")
-        st.write("Validates that expiring trades have corresponding Vcto entries in the accounting interface")
+        st.write(f"Validates {validation_type} entries in the accounting interface")
+        if validation_type == "VENCIMIENTO":
+            st.write("Uses whichever override amount is non-zero (Extranjero or Local)")
+        else:
+            st.write("Uses Amortización Activa (Pata Activa) and Amortización Pasiva (Pata Pasiva)")
+        
         st.dataframe(validation_df, use_container_width=True, hide_index=True)
         
         # Calculate match statistics
@@ -968,7 +1155,7 @@ def validate_vencimiento_entries(expiries_df, interface_df, interface_cols, rule
         
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("Total Trades", total_count)
+            st.metric(f"Total {validation_type}", total_count)
         with col2:
             st.metric("Full Matches", full_match_count)
         with col3:
@@ -976,19 +1163,18 @@ def validate_vencimiento_entries(expiries_df, interface_df, interface_cols, rule
         
         # Status breakdown
         status_counts = validation_df['status'].value_counts().to_dict()
-        st.subheader("VENCIMIENTO Status Breakdown")
-        st.write(status_counts)
+        st.write(f"**{validation_type} Status Breakdown:**", status_counts)
         
         # Download results
         csv = validation_df.to_csv().encode('utf-8')
         st.download_button(
-            "Download VENCIMIENTO Validation Results",
+            f"Download {validation_type} Validation Results",
             csv,
-            "vencimiento_validation_results.csv",
+            f"{validation_type.lower()}_validation_results.csv",
             "text/csv",
-            key="download-csv-vencimiento"
+            key=f"download-csv-{validation_type.lower()}"
         )
     else:
-        st.warning("No VENCIMIENTO validation results generated")
+        st.warning(f"No {validation_type} validation results generated")
     
     return validation_df
