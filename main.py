@@ -8,7 +8,9 @@ from file_parsers import (
     parse_mtm_file, 
     parse_day_trades_file, 
     parse_expiries_file, 
-    parse_rules_file
+    parse_rules_file,
+    parse_expiry_complementary_file,
+    enrich_expiries_with_complementary_data
 )
 from validators import validate_day_trades, validate_mtm_entries, validate_vencimiento_entries
 
@@ -43,6 +45,8 @@ with st.sidebar:
                                  help="Required for MTM Reversal validation")
     expiries_file = st.file_uploader("Upload Expiries File", type=["xls", "xlsx"], 
                                  help="Required for VENCIMIENTO validation")                             
+    expiry_complementary_file = st.file_uploader("Upload Expiry Complementary Data", type=["xlsx", "xls"],
+                                   help="Provides amortization and hedge accounting data for expiries")
     
     # Debug options
     st.subheader("Debug Options")
@@ -56,7 +60,8 @@ st.sidebar.markdown("""
 **Day Trades Validation**: Interface + Rules + Day Trades files  
 **MTM Valorization**: Interface + Rules + MTM (T) files  
 **MTM Reversal**: Interface + Rules + MTM (T-1) files  
-**VENCIMIENTO Validation**: Interface + Rules + Expiries files
+**VENCIMIENTO Validation**: Interface + Rules + Expiries files  
+**Enhanced VENCIMIENTO**: Also upload Expiry Complementary Data for complete data
 """)
 
 # Main area - only show if core files are uploaded
@@ -66,7 +71,9 @@ if interface_file and rules_file:
     # Parse core files
     with st.expander("Interface File", expanded=False):
         interface_df, interface_cols = parse_interface_file(interface_file)
-    
+        st.write("DEBUG HERE MAIN:")
+        st.write(interface_cols)
+        
     with st.expander("Rules File", expanded=False):
         rules_df = parse_rules_file(rules_file)
     
@@ -88,19 +95,42 @@ if interface_file and rules_file:
         with st.expander("Day Trades File", expanded=False):
             day_trades_df = parse_day_trades_file(day_trades_file)
             
+    # Parse complementary data first
+    expiry_complementary_df = None
+    if expiry_complementary_file:
+        with st.expander("Expiry Complementary Data", expanded=False):
+            expiry_complementary_df = parse_expiry_complementary_file(expiry_complementary_file)
+
+    # Parse and enrich expiries
     expiries_df = None
     if expiries_file:
         with st.expander("Expiries File", expanded=False):
-            expiries_df = parse_expiries_file(expiries_file)
+            expiries_df_raw = parse_expiries_file(expiries_file)
+            
+            # Enrich with complementary data if available
+            if expiry_complementary_df is not None and not expiry_complementary_df.empty:
+                expiries_df = enrich_expiries_with_complementary_data(expiries_df_raw, expiry_complementary_df)
+                st.success("✅ Expiries file enriched with complementary data")
+            else:
+                expiries_df = expiries_df_raw
+                st.info("ℹ️ Using expiries file without complementary data enrichment")
+                
+                # Add default columns if they don't exist
+                if 'Amortización Activa' not in expiries_df.columns:
+                    expiries_df['Amortización Activa'] = 0
+                if 'Amortización Pasiva' not in expiries_df.columns:
+                    expiries_df['Amortización Pasiva'] = 0
+                if 'Cobertura' not in expiries_df.columns:
+                    expiries_df['Cobertura'] = 'No'
 
-    # Validation options - only show available validations
+    # MOVED: Validation options - only show available validations AFTER all parsing is complete
     st.subheader("Available Validations")
     
-    # Check what validations are possible
+    # Check what validations are possible - NOW all dataframes are properly set
     can_validate_day_trades = day_trades_df is not None and not day_trades_df.empty
     can_validate_mtm = mtm_df is not None and not mtm_df.empty
     can_validate_reversal = mtm_t1_df is not None and not mtm_t1_df.empty
-    can_validate_vencimiento = expiries_df is not None and not expiries_df.empty
+    can_validate_vencimiento = expiries_file is not None  # Just check if file is uploaded, not the processed df
     
     if not any([can_validate_day_trades, can_validate_mtm, can_validate_reversal, can_validate_vencimiento]):
         st.warning("⚠️ No optional files uploaded. Please upload at least one optional file to enable validations.")
@@ -212,4 +242,5 @@ else:
     - **MTM File (T)**: For validating current day's MTM valorization
     - **MTM File (T-1)**: For validating reversal of previous day's MTM
     - **Expiries File**: For validating VENCIMIENTO entries
+    - **Expiry Complementary Data**: Provides amortization and hedge accounting data for enhanced VENCIMIENTO validation
     """)

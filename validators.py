@@ -692,6 +692,7 @@ def _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_
     
     # Extract needed columns from interface
     trade_number_col = next((col for col in interface_df.columns if any(x in str(col).lower() for x in ['operación', 'operacion', 'nro.'])), None)
+    
     debit_col = interface_cols['debit']
     credit_col = interface_cols['credit']
     account_col = interface_cols['account']
@@ -700,6 +701,9 @@ def _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_
         st.error("Could not find trade number column in interface file")
         return pd.DataFrame()
     
+    st.write("DEBUG HERE:")
+    st.dataframe(expiries_df, use_container_width=True, hide_index=True)
+
     # Filter interface for "Vcto" event_type entries (both VENCIMIENTO and TERMINO share this)
     vcto_entries = interface_df[interface_df['event_type'] == 'Vcto'].copy()
     st.write(f"Found {len(vcto_entries)} Vcto entries in interface file (shared by VENCIMIENTO and TERMINO)")
@@ -745,8 +749,8 @@ def _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_
         except (ValueError, TypeError):
             monto_local = 0
         
-        # Hardcode Cobertura to 'No' for now
-        cobertura = 'No'
+        # Get Cobertura from expiries file
+        cobertura = expiry.get('Cobertura', 'No')
         
         # Determine direction and amount
         if monto_extranjero != 0:
@@ -766,7 +770,7 @@ def _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_
         if debug_deal is not None:
             st.write(f"DEBUG VENCIMIENTO: Processing expiry {trade_number}, instrument: {instrument_type}")
             st.write(f"DEBUG VENCIMIENTO: Monto Extranjero: {monto_extranjero}, Monto Local: {monto_local}")
-            st.write(f"DEBUG VENCIMIENTO: Direction: {direction}, Using amount: {amount_to_use} (from {amount_source})")
+            st.write(f"DEBUG VENCIMIENTO: Cobertura: {cobertura}, Direction: {direction}, Using amount: {amount_to_use} (from {amount_source})")
         
         # Get applicable rules
         applicable_rules = vencimiento_rules[
@@ -919,13 +923,14 @@ def _validate_termino_only(expiries_df, interface_df, interface_cols, rules_df, 
         
         processed_count += 1
         
-        # Hardcode Cobertura to 'No' for now
-        cobertura = 'No'
+        # Get Cobertura from expiries file
+        cobertura = expiry.get('Cobertura', 'No')
         
         # Display debug info if requested
         if debug_deal is not None:
             st.write(f"DEBUG TERMINO: Processing expiry {trade_number}, instrument: {instrument_type}")
             st.write(f"DEBUG TERMINO: Amortización Activa: {amort_activa}, Amortización Pasiva: {amort_pasiva}")
+            st.write(f"DEBUG TERMINO: Cobertura: {cobertura}")
         
         # Get applicable rules (no direction filter for TERMINO - it reverses INICIO)
         applicable_rules = termino_rules[
@@ -1143,8 +1148,10 @@ def _display_validation_results(validation_results, validation_type):
         st.write(f"Validates {validation_type} entries in the accounting interface")
         if validation_type == "VENCIMIENTO":
             st.write("Uses whichever override amount is non-zero (Extranjero or Local)")
+            st.write("Matches rules by instrument type, cobertura, and direction")
         else:
             st.write("Uses Amortización Activa (Pata Activa) and Amortización Pasiva (Pata Pasiva)")
+            st.write("Matches rules by instrument type and cobertura (no direction filter)")
         
         st.dataframe(validation_df, use_container_width=True, hide_index=True)
         

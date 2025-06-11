@@ -379,7 +379,7 @@ def parse_day_trades_file(file):
     return df
 
 def parse_expiries_file(file):
-    """Parse the expiries Excel file."""
+    """Parse the expiries Excel file with correct column expectations."""
     try:
         # Get file name for logging
         file_name = getattr(file, 'name', 'unknown')
@@ -397,7 +397,7 @@ def parse_expiries_file(file):
                 # First, let's look at a preview to identify the header row
                 df_preview = pd.read_excel(file, header=None, nrows=15, engine=engine)
                 
-                # Reset file pointer and read with header on row 10
+                # Reset file pointer and read with header on row 10 (index 10)
                 file.seek(0)
                 df = pd.read_excel(file, header=10, engine=engine)
                 
@@ -422,11 +422,14 @@ def parse_expiries_file(file):
         # Show columns found
         st.write("Expiries file columns:", df.columns.tolist())
         
-        # Check if the required columns exist
+        # CORRECTED: Only check for columns that actually exist in the expiries file
+        # The amortization and cobertura columns will come from the complementary file
         required_columns = [
             'Número Operación', 'Fecha Vencimiento', 'Fecha Pago Capital', 
             'Fecha Pago Interés', 'Moneda Liquidación', 
-            'Monto Override Extranjero', 'Monto Override Local', 'Amortización Activa', 'Amortización Pasiva'
+            'Monto Override Extranjero', 'Monto Override Local'
+            # ❌ REMOVED: 'Amortización Activa', 'Amortización Pasiva', 'Cobertura'
+            # These come from the complementary file!
         ]
         
         missing_columns = [col for col in required_columns if col not in df.columns]
@@ -463,9 +466,7 @@ def parse_expiries_file(file):
         df['Número Operación'] = pd.to_numeric(df['Número Operación'], errors='coerce')
         df['Monto Override Extranjero'] = pd.to_numeric(df['Monto Override Extranjero'], errors='coerce')
         df['Monto Override Local'] = pd.to_numeric(df['Monto Override Local'], errors='coerce')
-        df['Amortización Activa'] = pd.to_numeric(df['Amortización Activa'], errors='coerce')
-        df['Amortización Pasiva'] = pd.to_numeric(df['Amortización Pasiva'], errors='coerce')
-        
+
         # Map product names to standard instrument types
         if 'Producto' in df.columns:
             # Create mapping for instrument types
@@ -496,17 +497,13 @@ def parse_expiries_file(file):
             st.warning("'Producto' column not found, can't map to instrument types")
             df['instrument_type'] = None
         
+        # ✅ DO NOT add the missing columns here - they will be added during enrichment
+        
         # Display summary information
         st.write(f"Found {len(df)} expiring trades")
         
         # Show payment date summary
         today = pd.Timestamp.now().normalize()
-        
-        # Format dates for display
-        df_display = df.copy()
-        for col in date_columns:
-            if col in df_display.columns:
-                df_display[f'{col}_formatted'] = df_display[col].dt.strftime('%d/%m/%Y')
         
         # Count items with payment dates today
         capital_today = sum(df['Fecha Pago Capital'].dt.normalize() == today)
@@ -531,6 +528,7 @@ def parse_expiries_file(file):
             'Número Operación', 'Producto', 'instrument_type' if 'instrument_type' in df.columns else None,
             'Fecha Vencimiento', 'Fecha Pago Capital', 'Fecha Pago Interés',
             'Moneda Liquidación', 'Monto Override Extranjero', 'Monto Override Local'
+            # ❌ REMOVED: 'Amortización Activa', 'Amortización Pasiva', 'Cobertura'
         ]
         display_columns = [col for col in display_columns if col is not None and col in df.columns]
         
@@ -543,6 +541,151 @@ def parse_expiries_file(file):
         import traceback
         st.error(traceback.format_exc())
         return pd.DataFrame()
+
+def parse_expiry_complementary_file(file):
+    """Parse the expiry complementary Excel file with additional information."""
+    
+    # Get file name for logging
+    file_name = getattr(file, 'name', 'unknown')
+    st.write(f"Attempting to parse Expiry Complementary file: {file_name}")
+    
+    # Try different engines
+    engines_to_try = ['openpyxl', 'xlrd']
+    df = None
+    
+    for engine in engines_to_try:
+        try:
+            st.write(f"Trying to read Expiry Complementary file with {engine} engine...")
+            
+            # Read the Excel file - assuming headers on first row
+            df = pd.read_excel(file, header=0, engine=engine)
+            
+            st.success(f"✅ Successfully parsed Expiry Complementary file using {engine} engine")
+            break
+            
+        except Exception as e:
+            st.warning(f"Failed with {engine} engine: {str(e)}")
+            file.seek(0)  # Reset file pointer for next attempt
+            continue
+    
+    # If all engines failed
+    if df is None:
+        st.error("❌ Could not parse the Expiry Complementary file with any Excel engine")
+        return pd.DataFrame()
+    
+    st.write("Expiry Complementary file columns:", df.columns.tolist())
+    st.write(f"Found {len(df)} deals in expiry complementary file")
+    
+    # Check if required columns exist
+    required_columns = ['DealNumber', 'pataActivaAmortizacion', 'pataPasivaAmortizacion', 'hedgeAccounting']
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    
+    if missing_columns:
+        st.error(f"Missing required columns in expiry complementary file: {', '.join(missing_columns)}")
+        st.write("Available columns:", df.columns.tolist())
+        
+        # Try to find similar column names
+        for missing_col in missing_columns:
+            possible_matches = [col for col in df.columns if missing_col.lower() in col.lower()]
+            if possible_matches:
+                st.write(f"Possible matches for '{missing_col}': {possible_matches}")
+        
+        return pd.DataFrame()
+    
+    # Convert DealNumber to numeric for matching
+    df['DealNumber'] = pd.to_numeric(df['DealNumber'], errors='coerce')
+    
+    # Convert amortization columns to numeric
+    df['pataActivaAmortizacion'] = pd.to_numeric(df['pataActivaAmortizacion'], errors='coerce').fillna(0)
+    df['pataPasivaAmortizacion'] = pd.to_numeric(df['pataPasivaAmortizacion'], errors='coerce').fillna(0)
+    
+    # Convert hedgeAccounting and map YES/NO to Sí/No
+    df['hedgeAccounting'] = df['hedgeAccounting'].astype(str).str.strip().str.upper()
+    hedge_mapping = {
+        'YES': 'Sí',
+        'NO': 'No',
+        'Y': 'Sí',
+        'N': 'No',
+        '1': 'Sí',
+        '0': 'No'
+    }
+    df['hedgeAccounting_mapped'] = df['hedgeAccounting'].map(hedge_mapping).fillna('No')
+    
+    # Display summary
+    st.write("Expiry Complementary file summary:")
+    st.write(f"- Total deals: {len(df)}")
+    st.write(f"- Deals with Activa amortization > 0: {len(df[df['pataActivaAmortizacion'] > 0])}")
+    st.write(f"- Deals with Pasiva amortization > 0: {len(df[df['pataPasivaAmortizacion'] > 0])}")
+    
+    # Show hedge accounting distribution
+    hedge_counts = df['hedgeAccounting_mapped'].value_counts()
+    st.write("Hedge Accounting distribution:", hedge_counts.to_dict())
+    
+    # Show preview
+    st.subheader("Expiry Complementary Preview")
+    preview_cols = ['DealNumber', 'pataActivaAmortizacion', 'pataPasivaAmortizacion', 
+                   'hedgeAccounting', 'hedgeAccounting_mapped']
+    st.dataframe(df[preview_cols].head(10), use_container_width=True)
+    
+    return df
+
+def enrich_expiries_with_complementary_data(expiries_df, complementary_df):
+    """
+    Enrich expiries dataframe with data from expiry complementary file.
+    
+    Merges on Número Operación (expiries) = DealNumber (complementary)
+    """
+    if expiries_df.empty or complementary_df.empty:
+        st.warning("Cannot enrich expiries - one of the dataframes is empty")
+        return expiries_df
+    
+    st.write("🔗 Enriching expiries file with complementary data...")
+    
+    # Ensure both key columns are numeric for proper matching
+    expiries_df['Número Operación'] = pd.to_numeric(expiries_df['Número Operación'], errors='coerce')
+    complementary_df['DealNumber'] = pd.to_numeric(complementary_df['DealNumber'], errors='coerce')
+    
+    # Create the mapping dataframe with only needed columns
+    complementary_mapping = complementary_df[['DealNumber', 'pataActivaAmortizacion', 'pataPasivaAmortizacion', 'hedgeAccounting_mapped']].copy()
+    complementary_mapping = complementary_mapping.rename(columns={
+        'DealNumber': 'Número Operación',
+        'pataActivaAmortizacion': 'Amortización Activa',
+        'pataPasivaAmortizacion': 'Amortización Pasiva', 
+        'hedgeAccounting_mapped': 'Cobertura'
+    })
+    
+    # Remove duplicates based on deal number (keep first occurrence)
+    complementary_mapping = complementary_mapping.drop_duplicates(subset=['Número Operación'], keep='first')
+    
+    # Perform left merge to keep all expiries records
+    enriched_df = expiries_df.merge(complementary_mapping, on='Número Operación', how='left')
+    
+    # Fill NaN values for unmatched records
+    enriched_df['Amortización Activa'] = enriched_df['Amortización Activa'].fillna(0)
+    enriched_df['Amortización Pasiva'] = enriched_df['Amortización Pasiva'].fillna(0)  
+    enriched_df['Cobertura'] = enriched_df['Cobertura'].fillna('No')
+    
+    # Show enrichment statistics
+    total_expiries = len(expiries_df)
+    matched_expiries = len(enriched_df[enriched_df['Cobertura'].notna() & (enriched_df['Cobertura'] != 'No')])
+    unmatched_expiries = total_expiries - len(enriched_df.merge(complementary_mapping, on='Número Operación', how='inner'))
+    
+    st.write("📊 Enrichment Results:")
+    st.write(f"- Total expiries: {total_expiries}")
+    st.write(f"- Matched with complementary data: {total_expiries - unmatched_expiries}")
+    st.write(f"- Unmatched (will use defaults): {unmatched_expiries}")
+    
+    # Show cobertura distribution in enriched data
+    cobertura_counts = enriched_df['Cobertura'].value_counts()
+    st.write("Final Cobertura distribution:", cobertura_counts.to_dict())
+    
+    # Show amortization summary
+    activa_nonzero = len(enriched_df[enriched_df['Amortización Activa'] > 0])
+    pasiva_nonzero = len(enriched_df[enriched_df['Amortización Pasiva'] > 0])
+    st.write(f"Trades with Amortización Activa > 0: {activa_nonzero}")
+    st.write(f"Trades with Amortización Pasiva > 0: {pasiva_nonzero}")
+    
+    return enriched_df
 
 def parse_rules_file(file):
     """Parse the accounting rules Excel file."""
