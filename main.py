@@ -10,7 +10,7 @@ from file_parsers import (
     parse_expiries_file, 
     parse_rules_file
 )
-from validators import validate_day_trades, validate_mtm_entries
+from validators import validate_day_trades, validate_mtm_entries, validate_vencimiento_entries
 
 # Streamlit page configuration
 st.set_page_config(
@@ -42,7 +42,7 @@ with st.sidebar:
     mtm_t1_file = st.file_uploader("Upload MTM File (T-1)", type=["xlsx", "csv"], 
                                  help="Required for MTM Reversal validation")
     expiries_file = st.file_uploader("Upload Expiries File", type=["xls", "xlsx"], 
-                                 help="For future expiries validation")                             
+                                 help="Required for VENCIMIENTO validation")                             
     
     # Debug options
     st.subheader("Debug Options")
@@ -55,7 +55,8 @@ st.sidebar.subheader("File Requirements")
 st.sidebar.markdown("""
 **Day Trades Validation**: Interface + Rules + Day Trades files  
 **MTM Valorization**: Interface + Rules + MTM (T) files  
-**MTM Reversal**: Interface + Rules + MTM (T-1) files
+**MTM Reversal**: Interface + Rules + MTM (T-1) files  
+**VENCIMIENTO Validation**: Interface + Rules + Expiries files
 """)
 
 # Main area - only show if core files are uploaded
@@ -96,13 +97,14 @@ if interface_file and rules_file:
     st.subheader("Available Validations")
     
     # Check what validations are possible
-    can_validate_day_trades = day_trades_df is not None
-    can_validate_mtm = mtm_df is not None
-    can_validate_reversal = mtm_t1_df is not None
+    can_validate_day_trades = day_trades_df is not None and not day_trades_df.empty
+    can_validate_mtm = mtm_df is not None and not mtm_df.empty
+    can_validate_reversal = mtm_t1_df is not None and not mtm_t1_df.empty
+    can_validate_vencimiento = expiries_df is not None and not expiries_df.empty
     
-    if not any([can_validate_day_trades, can_validate_mtm, can_validate_reversal]):
+    if not any([can_validate_day_trades, can_validate_mtm, can_validate_reversal, can_validate_vencimiento]):
         st.warning("⚠️ No optional files uploaded. Please upload at least one optional file to enable validations.")
-        st.info("📁 Upload Day Trades file for trade validation, MTM file for valorization validation, or MTM (T-1) file for reversal validation.")
+        st.info("📁 Upload Day Trades file for trade validation, MTM file for valorization validation, MTM (T-1) file for reversal validation, or Expiries file for VENCIMIENTO validation.")
     else:
         col1, col2 = st.columns(2)
         
@@ -128,9 +130,16 @@ if interface_file and rules_file:
                 st.checkbox("❌ Run MTM Reversal Validation", value=False, disabled=True)
                 st.caption("Requires MTM (T-1) file")
                 run_reversal_validation = False
+                
+            if can_validate_vencimiento:
+                run_vencimiento_validation = st.checkbox("✅ Run VENCIMIENTO Validation", value=True)
+            else:
+                st.checkbox("❌ Run VENCIMIENTO Validation", value=False, disabled=True)
+                st.caption("Requires Expiries file")
+                run_vencimiento_validation = False
         
         # Run validations button - only show if at least one validation is selected
-        available_validations = sum([run_day_trades_validation, run_mtm_validation, run_reversal_validation])
+        available_validations = sum([run_day_trades_validation, run_mtm_validation, run_reversal_validation, run_vencimiento_validation])
         
         if available_validations > 0:
             if st.button(f"🚀 Run {available_validations} Validation(s)"):
@@ -173,6 +182,17 @@ if interface_file and rules_file:
                             key_suffix='-reversal',
                             debug_deal=debug_deal
                         )
+                    
+                    # Run VENCIMIENTO validation if selected
+                    if run_vencimiento_validation:
+                        st.header("📅 VENCIMIENTO Validation")
+                        vencimiento_results = validate_vencimiento_entries(
+                            expiries_df,
+                            interface_df,
+                            interface_cols,
+                            rules_df,
+                            debug_deal=debug_deal
+                        )
         else:
             st.info("Please select at least one validation to run.")
 
@@ -191,5 +211,5 @@ else:
     - **Day Trades File**: For validating new trades entered today
     - **MTM File (T)**: For validating current day's MTM valorization
     - **MTM File (T-1)**: For validating reversal of previous day's MTM
-    - **Expiries File**: For future expiries validation (not yet implemented)
-    """) 
+    - **Expiries File**: For validating VENCIMIENTO entries
+    """)
