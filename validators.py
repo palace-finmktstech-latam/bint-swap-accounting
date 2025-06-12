@@ -1185,3 +1185,361 @@ def _display_validation_results(validation_results, validation_type):
         st.warning(f"No {validation_type} validation results generated")
     
     return validation_df
+
+def validate_incumplimiento_entries(incumplimientos_df, interface_df, interface_cols, rules_df, debug_deal=None):
+    """
+    Validate incumplimiento entries against accounting interface entries.
+    
+    For each incumplimiento event, checks that:
+    1. Corresponding "Incumplimiento" entries exist in the accounting interface
+    2. Correct account numbers are used based on instrument type, counterparty type, and flow currency
+    3. Transaction amounts match the incumplimiento amount
+    4. Amounts are in the correct fields (debe/haber)
+    5. The number of entries exactly matches what's expected from rules
+    """
+    # Filter rules for INCUMPLIMIENTO event
+    incumplimiento_rules = rules_df[rules_df['event'] == 'Incumplimiento'].copy()
+    
+    if len(incumplimiento_rules) == 0:
+        st.error("No INCUMPLIMIENTO rules found in rules file")
+        return pd.DataFrame()
+    
+    st.subheader("INCUMPLIMIENTO Rules")
+    st.dataframe(incumplimiento_rules, use_container_width=True, hide_index=True)
+    
+    # Extract needed columns from interface
+    trade_number_col = next((col for col in interface_df.columns if any(x in str(col).lower() for x in ['operación', 'operacion', 'nro.'])), None)
+    debit_col = interface_cols['debit']
+    credit_col = interface_cols['credit']
+    account_col = interface_cols['account']
+    glosa_col = interface_cols['glosa']
+    
+    if not trade_number_col:
+        st.error("Could not find trade number column in interface file")
+        return pd.DataFrame()
+    
+    # Filter interface for "Incumplimiento" event_type entries
+    incumplimiento_entries = interface_df[interface_df['event_type'] == 'Incumplimiento'].copy()
+    st.write(f"Found {len(incumplimiento_entries)} Incumplimiento entries in interface file")
+    
+    # Ensure numeric values
+    incumplimiento_entries[debit_col] = pd.to_numeric(incumplimiento_entries[debit_col], errors='coerce').fillna(0)
+    incumplimiento_entries[credit_col] = pd.to_numeric(incumplimiento_entries[credit_col], errors='coerce').fillna(0)
+    
+    # Get instrument type from interface entries (extract from glosa)
+    if len(incumplimiento_entries) > 0:
+        # Add instrument type extraction for interface entries if not already present
+        if 'instrument_type' not in incumplimiento_entries.columns:
+            incumplimiento_entries['instrument_type'] = incumplimiento_entries[glosa_col].apply(lambda x: 
+                'Swap Tasa' if 'Swap Tasa' in x 
+                else ('Swap Moneda' if 'Swap Moneda' in x 
+                else ('Swap Cámara' if 'Swap Cámara' in x or 'ICP' in x else None)))
+    
+    # Prepare validation results
+    validation_results = []
+    
+    st.write(f"Processing {len(incumplimientos_df)} incumplimiento events for validation")
+    
+    # Process each incumplimiento event
+    for _, incumplimiento in incumplimientos_df.iterrows():
+        deal_number = incumplimiento['numero_operacion']
+        
+        # Skip if not the debug deal (when in debug mode)
+        if debug_deal is not None and str(deal_number) != str(debug_deal):
+            continue
+            
+        monto = incumplimiento['monto']
+        moneda = incumplimiento['moneda']
+        cliente = incumplimiento['nombre_cliente']
+        
+        # FIXED: Hard-code counterparty type as "Otras Instituciones" for now
+        tipo_contraparte = "Otras Instituciones"
+        #tipo_contraparte = "Instituciones Financieras"
+        
+        # FIXED: Map moneda_flujo based on the actual currency
+        if moneda == 'CLP':
+            moneda_flujo = 'CLP'
+        elif moneda in ['USD', 'EUR']:
+            moneda_flujo = 'MX'
+        else:
+            # Handle unexpected currencies - default to the actual currency
+            moneda_flujo = moneda
+            st.warning(f"Unexpected currency '{moneda}' for deal {deal_number}, using as-is for moneda_flujo")
+        
+        # Display debug info if requested
+        if debug_deal is not None:
+            st.write(f"DEBUG: Processing incumplimiento {deal_number}")
+            st.write(f"DEBUG: Monto: {monto}, Moneda: {moneda}")
+            st.write(f"DEBUG: Tipo Contraparte: {tipo_contraparte} (hard-coded)")
+            st.write(f"DEBUG: Moneda Flujo: {moneda_flujo} (mapped from {moneda})")
+            st.write(f"DEBUG: Cliente: {cliente}")
+        
+        # Find corresponding interface entries for this deal
+        deal_interface_entries = incumplimiento_entries[
+            incumplimiento_entries[trade_number_col] == deal_number
+        ].copy()
+        
+        if len(deal_interface_entries) == 0:
+            validation_results.append({
+                'deal_number': str(deal_number),
+                'cliente': cliente,
+                'tipo_contraparte': tipo_contraparte,
+                'moneda_flujo': moneda_flujo,
+                'moneda_original': moneda,
+                'monto': monto,
+                'status': 'Missing Interface Entries',
+                'interface_entries': 0,
+                'expected_entries': 0,
+                'issue': f'No Incumplimiento entries found in interface for deal {deal_number}'
+            })
+            continue
+        
+        # Extract instrument type from interface entries
+        instrument_types = deal_interface_entries['instrument_type'].dropna().unique()
+        
+        if len(instrument_types) == 0:
+            validation_results.append({
+                'deal_number': str(deal_number),
+                'cliente': cliente,
+                'tipo_contraparte': tipo_contraparte,
+                'moneda_flujo': moneda_flujo,
+                'moneda_original': moneda,
+                'monto': monto,
+                'status': 'Unknown Instrument Type',
+                'interface_entries': len(deal_interface_entries),
+                'expected_entries': 0,
+                'issue': f'Could not determine instrument type from interface entries'
+            })
+            continue
+        
+        # Use the first instrument type found (assuming all entries for a deal have same instrument type)
+        instrument_type = instrument_types[0]
+        
+        if debug_deal is not None:
+            st.write(f"DEBUG: Detected instrument type: {instrument_type}")
+            st.write(f"DEBUG: Found {len(deal_interface_entries)} interface entries for deal {deal_number}")
+            st.dataframe(deal_interface_entries, use_container_width=True, hide_index=True)
+        
+        # Get applicable rules for this combination
+        # Include rules where counterparty_type matches OR is blank (applies to all)
+        applicable_rules = incumplimiento_rules[
+            (incumplimiento_rules['subproduct'] == instrument_type) & 
+            (
+                (incumplimiento_rules['counterparty_type'] == tipo_contraparte) |
+                (incumplimiento_rules['counterparty_type'].isna()) |
+                (incumplimiento_rules['counterparty_type'] == '') |
+                (incumplimiento_rules['counterparty_type'] == 'nan')
+            ) &
+            (incumplimiento_rules['flow_currency'] == moneda_flujo)
+        ]
+        
+        if len(applicable_rules) == 0:
+            validation_results.append({
+                'deal_number': str(deal_number),
+                'cliente': cliente,
+                'tipo_contraparte': tipo_contraparte,
+                'moneda_flujo': moneda_flujo,
+                'moneda_original': moneda,
+                'monto': monto,
+                'status': 'Missing Rule',
+                'interface_entries': len(deal_interface_entries),
+                'expected_entries': 0,
+                'issue': f'No rule found for {instrument_type} + {tipo_contraparte} + {moneda_flujo}'
+            })
+            continue
+        
+        if debug_deal is not None:
+            st.write(f"DEBUG: Found {len(applicable_rules)} applicable rules:")
+            st.dataframe(applicable_rules, use_container_width=True, hide_index=True)
+        
+        # Build expected accounts list from rules (no Pata logic for Incumplimiento)
+        expected_accounts = []
+        expected_amounts = {}
+        
+        for _, rule in applicable_rules.iterrows():
+            if pd.notna(rule['debit_account']):
+                account = str(rule['debit_account'])
+                expected_accounts.append(account)
+                expected_amounts[account] = {'amount': abs(monto), 'field': 'debit'}
+            
+            if pd.notna(rule['credit_account']):
+                account = str(rule['credit_account'])
+                expected_accounts.append(account)
+                expected_amounts[account] = {'amount': abs(monto), 'field': 'credit'}
+
+        # Remove any "None" values
+        expected_accounts = [acc for acc in expected_accounts if acc != "None" and acc != "nan"]
+        expected_entry_count = len(expected_accounts)
+        
+        if debug_deal is not None:
+            st.write(f"DEBUG: Expected {expected_entry_count} entries")
+            st.write(f"DEBUG: Expected account numbers: {expected_accounts}")
+            st.write("DEBUG: Expected amounts by account:")
+            for acc, info in expected_amounts.items():
+                st.write(f"  {acc}: {info['amount']} ({info['field']})")
+        
+        # Check if we found exactly the right number of entries
+        if len(deal_interface_entries) != expected_entry_count:
+            validation_results.append({
+                'deal_number': str(deal_number),
+                'cliente': cliente,
+                'tipo_contraparte': tipo_contraparte,
+                'moneda_flujo': moneda_flujo,
+                'moneda_original': moneda,
+                'monto': monto,
+                'status': 'Entry Count Mismatch',
+                'interface_entries': len(deal_interface_entries),
+                'expected_entries': expected_entry_count,
+                'issue': f'Expected {expected_entry_count} entries, found {len(deal_interface_entries)}'
+            })
+            continue
+            
+        # Check if each expected account is present
+        found_accounts = deal_interface_entries[account_col].astype(str).unique().tolist()
+        missing_accounts = [acc for acc in expected_accounts if acc not in found_accounts]
+        extra_accounts = [acc for acc in found_accounts if acc not in expected_accounts]
+
+        if missing_accounts:
+            validation_results.append({
+                'deal_number': str(deal_number),
+                'cliente': cliente,
+                'tipo_contraparte': tipo_contraparte,
+                'moneda_flujo': moneda_flujo,
+                'moneda_original': moneda,
+                'monto': monto,
+                'status': 'Missing Accounts',
+                'interface_entries': len(deal_interface_entries),
+                'expected_entries': expected_entry_count,
+                'issue': f'Missing expected accounts: {", ".join(missing_accounts)}'
+            })
+            continue
+
+        if extra_accounts:
+            validation_results.append({
+                'deal_number': str(deal_number),
+                'cliente': cliente,
+                'tipo_contraparte': tipo_contraparte,
+                'moneda_flujo': moneda_flujo,
+                'moneda_original': moneda,
+                'monto': monto,
+                'status': 'Extra Accounts',
+                'interface_entries': len(deal_interface_entries),
+                'expected_entries': expected_entry_count,
+                'issue': f'Found unexpected accounts: {", ".join(extra_accounts)}'
+            })
+            continue
+        
+        # At this point we have the right number of entries with the right accounts
+        # Now check the amounts in each entry
+        account_validation = {}
+        for account in expected_accounts:
+            account_entries = deal_interface_entries[deal_interface_entries[account_col].astype(str) == account]
+            
+            # Get expected amount and field from our mapping
+            expected_info = expected_amounts[account]
+            expected_amount = expected_info['amount']
+            expected_field = expected_info['field']
+
+            # Get the total amount in the expected field
+            if expected_field == 'debit':
+                actual_amount = account_entries[debit_col].sum()
+            elif expected_field == 'credit':
+                actual_amount = account_entries[credit_col].sum()
+            else:
+                actual_amount = 0
+            
+            # Check if amount matches the expected value
+            is_matching = abs(actual_amount - expected_amount) < 1.0
+            
+            account_validation[account] = {
+                'expected_field': expected_field,
+                'expected_amount': expected_amount,
+                'actual_amount': actual_amount,
+                'matches': is_matching
+            }
+            
+            if debug_deal is not None:
+                if is_matching:
+                    st.success(f"✓ Account {account} ({expected_field}): Expected {expected_amount}, Found {actual_amount:.2f}")
+                else:
+                    st.warning(f"✗ Account {account} ({expected_field}): Expected {expected_amount}, Found {actual_amount:.2f}")
+        
+        # Check if all amounts match
+        all_match = all(val['matches'] for val in account_validation.values())
+        
+        if all_match:
+            status = 'Full Match'
+            issue = ''
+        else:
+            status = 'Amount Mismatch'
+            mismatches = [
+                f"{account} ({val['expected_field']}): Expected {val['expected_amount']}, Found {val['actual_amount']:.2f}"
+                for account, val in account_validation.items() if not val['matches']
+            ]
+            issue = f"Amount mismatches: {'; '.join(mismatches)}"
+        
+        # Add to results
+        validation_results.append({
+            'deal_number': str(deal_number),
+            'cliente': cliente,
+            'tipo_contraparte': tipo_contraparte,
+            'moneda_flujo': moneda_flujo,
+            'moneda_original': moneda,
+            'monto': monto,
+            'status': status,
+            'interface_entries': len(deal_interface_entries),
+            'expected_entries': expected_entry_count,
+            'issue': issue
+        })
+    
+    # Create validation results dataframe
+    validation_df = pd.DataFrame(validation_results)
+    
+    if len(validation_df) > 0:
+        # Format for display
+        for col in validation_df.columns:
+            if validation_df[col].dtype == 'object':
+                validation_df[col] = validation_df[col].astype(str)
+        
+        # Round numeric columns
+        numeric_cols = validation_df.select_dtypes(include=['float64', 'int64']).columns
+        for col in numeric_cols:
+            validation_df[col] = validation_df[col].round(2)
+        
+        # Display validation results
+        st.subheader("Incumplimiento Validation Results")
+        st.write("Validates that incumplimiento events have corresponding entries in the accounting interface")
+        st.write("Matches rules by instrument type, counterparty type (hard-coded as 'Otras Instituciones' or blank), and flow currency (CLP=CLP, MX=USD/EUR)")
+        st.dataframe(validation_df, use_container_width=True, hide_index=True)
+        
+        # Calculate match statistics
+        full_match_count = len(validation_df[validation_df['status'] == 'Full Match'])
+        total_count = len(validation_df)
+        match_percentage = (full_match_count / total_count * 100) if total_count > 0 else 0
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Incumplimientos", total_count)
+        with col2:
+            st.metric("Full Matches", full_match_count)
+        with col3:
+            st.metric("Match Rate", f"{match_percentage:.1f}%")
+        
+        # Status breakdown
+        status_counts = validation_df['status'].value_counts().to_dict()
+        st.subheader("Status Breakdown")
+        st.write(status_counts)
+        
+        # Download results
+        csv = validation_df.to_csv().encode('utf-8')
+        st.download_button(
+            "Download Incumplimiento Validation Results",
+            csv,
+            "incumplimiento_validation_results.csv",
+            "text/csv",
+            key="download-csv-incumplimiento"
+        )
+    else:
+        st.warning("No incumplimiento validation results generated")
+    
+    return validation_df

@@ -78,22 +78,20 @@ def parse_interface_file(file):
         # Convert to string to ensure extraction works
         df[glosa_col] = df[glosa_col].astype(str)
         
-        # Extract event type - Updated to handle both VENCIMIENTO and TERMINO
+        # Extract event type - Updated to handle INCUMPLIMIENTO
         df['event_type'] = df[glosa_col].apply(lambda x: 
-            'Valorización MTM' if 'Valorización' in x or 'MTM' in x 
+            'Incumplimiento' if 'Incumplimiento' in x
+            else ('Valorización MTM' if 'Valorización' in x or 'MTM' in x 
             else ('Curse' if 'Curse' in x 
             else ('Vcto' if 'Vcto' in x or 'Vencimiento' in x  # Both VENCIMIENTO and TERMINO use Vcto/Vencimiento glosa
             else ('Reversa Valorización MTM' if 'Reversa' in x or 'Reverso' in x 
-            else None))))
-        
-        # Note: TERMINO entries will also be classified as 'Vcto' since they share the same glosa
-        # The validation logic will separate them by matching against different rule accounts
+            else None)))))
         
         # Extract instrument type
         df['instrument_type'] = df[glosa_col].apply(lambda x: 
             'Swap Tasa' if 'Swap Tasa' in x 
             else ('Swap Moneda' if 'Swap Moneda' in x 
-            else ('Swap Cámara' if 'Swap Cámara' in x else None)))
+            else ('Swap Cámara' if 'Swap Cámara' in x or 'ICP' in x else None)))
         
         # Extract currency pair using regex pattern matching
         def extract_currency_pair(glosa):
@@ -116,13 +114,175 @@ def parse_interface_file(file):
         st.write("Instrument type counts:", instrument_counts.to_dict())
         st.write("Currency pair counts:", currency_counts.to_dict())
         
-        # Show additional info about Vcto entries
+        # Show additional info about different entry types
         vcto_count = len(df[df['event_type'] == 'Vcto'])
+        incumplimiento_count = len(df[df['event_type'] == 'Incumplimiento'])
+        
         if vcto_count > 0:
             st.info(f"ℹ️ Found {vcto_count} 'Vcto' entries (includes both VENCIMIENTO and TERMINO entries)")
+        if incumplimiento_count > 0:
+            st.info(f"ℹ️ Found {incumplimiento_count} 'Incumplimiento' entries")
     
     return df, key_columns
 
+def parse_incumplimientos_file(file):
+    """Parse the incumplimientos Excel file."""
+    try:
+        # Get file name for logging
+        file_name = getattr(file, 'name', 'unknown')
+        st.write(f"Attempting to parse Incumplimientos file: {file_name}")
+        
+        # Try different engines
+        engines_to_try = ['openpyxl', 'xlrd']
+        df_preview = None
+        df = None
+        
+        for engine in engines_to_try:
+            try:
+                st.write(f"Trying to read Incumplimientos file with {engine} engine...")
+                
+                # First, let's look at a preview to identify the header row
+                df_preview = pd.read_excel(file, header=None, nrows=15, engine=engine)
+                
+                # Based on the analysis, headers are on row 11 (index 10)
+                file.seek(0)
+                df = pd.read_excel(file, header=10, engine=engine)
+                
+                st.success(f"✅ Successfully parsed Incumplimientos file using {engine} engine")
+                break
+                
+            except Exception as e:
+                st.warning(f"Failed with {engine} engine: {str(e)}")
+                file.seek(0)  # Reset file pointer for next attempt
+                continue
+        
+        # If all engines failed
+        if df is None or df_preview is None:
+            st.error("❌ Could not parse the Incumplimientos file with any Excel engine")
+            return pd.DataFrame()
+        
+        # Convert to string for display
+        df_preview_display = df_preview.astype(str)
+        st.write("Incumplimientos file preview (first 15 rows):")
+        st.dataframe(df_preview_display)
+        
+        # Show columns found
+        st.write("Incumplimientos file columns:", df.columns.tolist())
+        
+        # Check for required columns based on the analysis
+        required_columns = [
+            'Fecha y Hora', 'Número de operación', 'Monto', 'Moneda', 
+            'rut', 'Cliente', 'Acción', 'Usuario que realizó la acción'
+        ]
+        
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        
+        if missing_columns:
+            st.error(f"Missing required columns in incumplimientos file: {', '.join(missing_columns)}")
+            
+            # Show available columns for debugging
+            st.write("Available columns:", df.columns.tolist())
+            
+            # Try to find similar column names
+            for missing_col in missing_columns:
+                possible_matches = [col for col in df.columns if missing_col.lower() in col.lower()]
+                if possible_matches:
+                    st.write(f"Possible matches for '{missing_col}': {possible_matches}")
+            
+            return pd.DataFrame()
+        
+        # Clean and standardize column names for easier processing
+        column_mapping = {
+            'Fecha y Hora': 'fecha_hora',
+            'Número de operación': 'numero_operacion', 
+            'Monto': 'monto',
+            'Moneda': 'moneda',
+            'rut': 'rut_cliente',
+            'Cliente': 'nombre_cliente',
+            'Acción': 'accion',
+            'Usuario que realizó la acción': 'usuario'
+        }
+        
+        # Rename columns
+        df = df.rename(columns=column_mapping)
+        
+        # Convert data types
+        df['numero_operacion'] = pd.to_numeric(df['numero_operacion'], errors='coerce')
+        df['monto'] = pd.to_numeric(df['monto'], errors='coerce')
+        
+        # Convert fecha_hora to datetime if it's not already
+        if not pd.api.types.is_datetime64_any_dtype(df['fecha_hora']):
+            try:
+                # Try to convert from Excel date format (days since 1900-01-01)
+                df['fecha_hora'] = pd.to_datetime(df['fecha_hora'], origin='1899-12-30', unit='D')
+            except:
+                try:
+                    # Fallback to regular datetime parsing
+                    df['fecha_hora'] = pd.to_datetime(df['fecha_hora'], errors='coerce')
+                except:
+                    st.warning("Could not convert fecha_hora to datetime format")
+        
+        # Filter only for Incumplimiento actions
+        df = df[df['accion'].str.contains('Incumplimiento', case=False, na=False)].copy()
+        
+        # Ensure string formatting for text fields
+        df['rut_cliente'] = df['rut_cliente'].astype(str)
+        df['nombre_cliente'] = df['nombre_cliente'].astype(str)
+        df['moneda'] = df['moneda'].astype(str)
+        df['usuario'] = df['usuario'].astype(str)
+        
+        # Add counterparty type classification (this will need to be enhanced based on business rules)
+        # For now, we'll create a simple classification based on RUT or client name patterns
+        def classify_counterparty_type(row):
+            cliente = str(row['nombre_cliente']).lower()
+            if 'banco' in cliente or 'bank' in cliente:
+                return 'Banco'
+            elif 'corredora' in cliente or 'securities' in cliente:
+                return 'Corredora'
+            elif 'seguros' in cliente or 'insurance' in cliente:
+                return 'Seguros'
+            elif 'pension' in cliente or 'afp' in cliente:
+                return 'AFP'
+            else:
+                return 'Otro'
+        
+        df['tipo_contraparte'] = df.apply(classify_counterparty_type, axis=1)
+        
+        # Add flow currency (moneda_flujo) - for now, same as moneda but can be enhanced
+        df['moneda_flujo'] = df['moneda']
+        
+        # Display summary information
+        st.write(f"Found {len(df)} incumplimiento events")
+        
+        # Show currency distribution
+        currency_counts = df['moneda'].value_counts()
+        st.write("Currency distribution:", currency_counts.to_dict())
+        
+        # Show counterparty type distribution
+        counterparty_counts = df['tipo_contraparte'].value_counts()
+        st.write("Counterparty type distribution:", counterparty_counts.to_dict())
+        
+        # Show user distribution
+        user_counts = df['usuario'].value_counts()
+        st.write("User distribution:", user_counts.to_dict())
+        
+        # Display preview of the parsed data
+        st.subheader("Incumplimientos Preview")
+        display_columns = [
+            'fecha_hora', 'numero_operacion', 'monto', 'moneda', 
+            'nombre_cliente', 'tipo_contraparte', 'moneda_flujo', 'usuario'
+        ]
+        st.dataframe(df[display_columns].head(10), use_container_width=True)
+        
+        return df
+        
+    except Exception as e:
+        st.error(f"Error parsing incumplimientos file: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
+        return pd.DataFrame()
+
+# Keep all existing functions unchanged
 def parse_mtm_file(file):
     """Parse the MTM Excel file and sum MTM values by deal."""
     
@@ -751,7 +911,7 @@ def parse_rules_file(file):
     
     # Process preview
     df_preview = df_preview.dropna(how='all')
-    df_preview = df_preview.iloc[:, :14]
+    df_preview = df_preview.iloc[:, :16]  # Updated to show more columns for Incumplimiento
     
     # Convert to string before displaying
     df_preview = df_preview.astype(str)
@@ -762,14 +922,14 @@ def parse_rules_file(file):
     # Remove rows where all values are NaN
     df = df.dropna(how='all')
 
-    # Remove the columns after number 14 as these aren't relevant
-    df = df.iloc[:, :14]
+    # Remove the columns after number 16 as these aren't relevant (updated for new columns)
+    df = df.iloc[:, :16]
         
     # Log the number of rows after removing empty rows
     st.write(f"Rules file has {len(df)} rows after removing empty rows")
     st.write("Rules file columns:", df.columns.tolist())
     
-    # Identify key columns
+    # Identify key columns - Updated to include new Incumplimiento columns
     key_columns = {}
     for col in df.columns:
         col_str = str(col).lower()
@@ -785,8 +945,12 @@ def parse_rules_file(file):
             key_columns['credit_account'] = col
         elif 'cobertura' in col_str:
             key_columns['coverage'] = col
-        elif 'pata' in col_str:  # Added this line to recognize Pata column
+        elif 'pata' in col_str:
             key_columns['pata'] = col
+        elif 'tipo' in col_str and 'contraparte' in col_str:  # New for Incumplimiento
+            key_columns['counterparty_type'] = col
+        elif 'moneda' in col_str and 'flujo' in col_str:  # New for Incumplimiento
+            key_columns['flow_currency'] = col
     
     st.write("Identified rule columns:", key_columns)
     
@@ -799,21 +963,18 @@ def parse_rules_file(file):
         df = df.rename(columns={'pata': 'Pata'})
     elif 'Pata' not in df.columns:
         # If Pata column is missing, show available columns for debugging
-        st.error("❌ Could not find 'Pata' column in rules file")
-        st.write("Available columns after processing:", df.columns.tolist())
-        st.write("Raw column names from file:", list(df.columns))
-        return pd.DataFrame()
+        # Note: Pata might not be relevant for all event types (like Incumplimiento)
+        st.info("ℹ️ 'Pata' column not found - this is normal for some event types like Incumplimiento")
     
     # Map event codes
     if 'event' in df.columns:
         event_mapping = {
             'INICIO': 'Curse',
             'VALORIZACION': 'Valorización MTM',
-            #'VENCIMIENTO': 'Vcto',
             'VENCIMIENTO': 'Vencimiento',
-            #'TERMINO': 'Vcto',
             'TERMINO': 'Termino',
-            'REVERSA_VALORIZACION': 'Reversa Valorización MTM'
+            'REVERSA_VALORIZACION': 'Reversa Valorización MTM',
+            'INCUMPLIMIENTO': 'Incumplimiento'  # New event type
         }
         df['event'] = df['event'].map(event_mapping)
     
@@ -822,10 +983,19 @@ def parse_rules_file(file):
         event_counts = df['event'].value_counts(dropna=False)
         st.write("Event counts in rules:", event_counts.to_dict())
     
-    # Show Pata distribution
+    # Show Pata distribution if column exists
     if 'Pata' in df.columns:
         pata_counts = df['Pata'].value_counts(dropna=False)
         st.write("Pata distribution in rules:", pata_counts.to_dict())
+    
+    # Show new Incumplimiento-specific distributions
+    if 'counterparty_type' in df.columns:
+        counterparty_counts = df['counterparty_type'].value_counts(dropna=False)
+        st.write("Counterparty type distribution in rules:", counterparty_counts.to_dict())
+    
+    if 'flow_currency' in df.columns:
+        flow_currency_counts = df['flow_currency'].value_counts(dropna=False)
+        st.write("Flow currency distribution in rules:", flow_currency_counts.to_dict())
     
     # Handle 'Swap All' by expanding to all swap types
     if 'subproduct' in df.columns:
@@ -841,12 +1011,34 @@ def parse_rules_file(file):
         
         df_expanded = pd.DataFrame(expanded_rules)
         
-        # Final validation - ensure Pata column exists in expanded dataframe
-        if 'Pata' not in df_expanded.columns:
-            st.error("❌ Pata column missing after expansion")
+        # Final validation - check column existence based on event type
+        event_types = df_expanded['event'].unique() if 'event' in df_expanded.columns else []
+        
+        # Check if Pata column exists for events that need it
+        pata_required_events = ['Curse', 'Termino']
+        needs_pata = any(event in pata_required_events for event in event_types)
+        
+        if needs_pata and 'Pata' not in df_expanded.columns:
+            st.error("❌ Pata column missing for events that require it")
+            st.write("Events requiring Pata:", [e for e in event_types if e in pata_required_events])
             st.write("Columns in expanded dataframe:", df_expanded.columns.tolist())
             return pd.DataFrame()
+        
+        # Check if new Incumplimiento columns exist for Incumplimiento events
+        if 'Incumplimiento' in event_types:
+            missing_incump_cols = []
+            if 'counterparty_type' not in df_expanded.columns:
+                missing_incump_cols.append('Tipo Contraparte')
+            if 'flow_currency' not in df_expanded.columns:
+                missing_incump_cols.append('Moneda Flujo')
             
+            if missing_incump_cols:
+                st.error(f"❌ Missing required columns for Incumplimiento events: {', '.join(missing_incump_cols)}")
+                st.write("Available columns:", df_expanded.columns.tolist())
+                return pd.DataFrame()
+            else:
+                st.success("✅ Found all required columns for Incumplimiento validation")
+        
         return df_expanded
     
     return df

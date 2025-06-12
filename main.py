@@ -10,9 +10,10 @@ from file_parsers import (
     parse_expiries_file, 
     parse_rules_file,
     parse_expiry_complementary_file,
-    enrich_expiries_with_complementary_data
+    enrich_expiries_with_complementary_data,
+    parse_incumplimientos_file  # New import
 )
-from validators import validate_day_trades, validate_mtm_entries, validate_vencimiento_entries
+from validators import validate_day_trades, validate_mtm_entries, validate_vencimiento_entries, validate_incumplimiento_entries
 
 # Streamlit page configuration
 st.set_page_config(
@@ -47,6 +48,8 @@ with st.sidebar:
                                  help="Required for VENCIMIENTO validation")                             
     expiry_complementary_file = st.file_uploader("Upload Expiry Complementary Data", type=["xlsx", "xls"],
                                    help="Provides amortization and hedge accounting data for expiries")
+    incumplimientos_file = st.file_uploader("Upload Incumplimientos File", type=["xls", "xlsx"],
+                                          help="Required for INCUMPLIMIENTO validation")
     
     # Debug options
     st.subheader("Debug Options")
@@ -61,7 +64,8 @@ st.sidebar.markdown("""
 **MTM Valorization**: Interface + Rules + MTM (T) files  
 **MTM Reversal**: Interface + Rules + MTM (T-1) files  
 **VENCIMIENTO Validation**: Interface + Rules + Expiries files  
-**Enhanced VENCIMIENTO**: Also upload Expiry Complementary Data for complete data
+**Enhanced VENCIMIENTO**: Also upload Expiry Complementary Data for complete data  
+**INCUMPLIMIENTO Validation**: Interface + Rules + Incumplimientos files
 """)
 
 # Main area - only show if core files are uploaded
@@ -71,8 +75,6 @@ if interface_file and rules_file:
     # Parse core files
     with st.expander("Interface File", expanded=False):
         interface_df, interface_cols = parse_interface_file(interface_file)
-        st.write("DEBUG HERE MAIN:")
-        st.write(interface_cols)
         
     with st.expander("Rules File", expanded=False):
         rules_df = parse_rules_file(rules_file)
@@ -123,6 +125,12 @@ if interface_file and rules_file:
                 if 'Cobertura' not in expiries_df.columns:
                     expiries_df['Cobertura'] = 'No'
 
+    # Parse incumplimientos file
+    incumplimientos_df = None
+    if incumplimientos_file:
+        with st.expander("Incumplimientos File", expanded=False):
+            incumplimientos_df = parse_incumplimientos_file(incumplimientos_file)
+
     # MOVED: Validation options - only show available validations AFTER all parsing is complete
     st.subheader("Available Validations")
     
@@ -131,10 +139,11 @@ if interface_file and rules_file:
     can_validate_mtm = mtm_df is not None and not mtm_df.empty
     can_validate_reversal = mtm_t1_df is not None and not mtm_t1_df.empty
     can_validate_vencimiento = expiries_file is not None  # Just check if file is uploaded, not the processed df
+    can_validate_incumplimiento = incumplimientos_df is not None and not incumplimientos_df.empty
     
-    if not any([can_validate_day_trades, can_validate_mtm, can_validate_reversal, can_validate_vencimiento]):
+    if not any([can_validate_day_trades, can_validate_mtm, can_validate_reversal, can_validate_vencimiento, can_validate_incumplimiento]):
         st.warning("⚠️ No optional files uploaded. Please upload at least one optional file to enable validations.")
-        st.info("📁 Upload Day Trades file for trade validation, MTM file for valorization validation, MTM (T-1) file for reversal validation, or Expiries file for VENCIMIENTO validation.")
+        st.info("📁 Upload Day Trades file for trade validation, MTM file for valorization validation, MTM (T-1) file for reversal validation, Expiries file for VENCIMIENTO validation, or Incumplimientos file for INCUMPLIMIENTO validation.")
     else:
         col1, col2 = st.columns(2)
         
@@ -152,6 +161,13 @@ if interface_file and rules_file:
                 st.checkbox("❌ Run MTM Valorization Validation", value=False, disabled=True)
                 st.caption("Requires MTM (T) file")
                 run_mtm_validation = False
+            
+            if can_validate_incumplimiento:
+                run_incumplimiento_validation = st.checkbox("✅ Run INCUMPLIMIENTO Validation", value=True)
+            else:
+                st.checkbox("❌ Run INCUMPLIMIENTO Validation", value=False, disabled=True)
+                st.caption("Requires Incumplimientos file")
+                run_incumplimiento_validation = False
         
         with col2:
             if can_validate_reversal:
@@ -169,7 +185,7 @@ if interface_file and rules_file:
                 run_vencimiento_validation = False
         
         # Run validations button - only show if at least one validation is selected
-        available_validations = sum([run_day_trades_validation, run_mtm_validation, run_reversal_validation, run_vencimiento_validation])
+        available_validations = sum([run_day_trades_validation, run_mtm_validation, run_reversal_validation, run_vencimiento_validation, run_incumplimiento_validation])
         
         if available_validations > 0:
             if st.button(f"🚀 Run {available_validations} Validation(s)"):
@@ -223,6 +239,17 @@ if interface_file and rules_file:
                             rules_df,
                             debug_deal=debug_deal
                         )
+                    
+                    # Run INCUMPLIMIENTO validation if selected
+                    if run_incumplimiento_validation:
+                        st.header("⚠️ INCUMPLIMIENTO Validation")
+                        incumplimiento_results = validate_incumplimiento_entries(
+                            incumplimientos_df,
+                            interface_df,
+                            interface_cols,
+                            rules_df,
+                            debug_deal=debug_deal
+                        )
         else:
             st.info("Please select at least one validation to run.")
 
@@ -243,4 +270,5 @@ else:
     - **MTM File (T-1)**: For validating reversal of previous day's MTM
     - **Expiries File**: For validating VENCIMIENTO entries
     - **Expiry Complementary Data**: Provides amortization and hedge accounting data for enhanced VENCIMIENTO validation
+    - **Incumplimientos File**: For validating INCUMPLIMIENTO entries
     """)
