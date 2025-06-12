@@ -11,7 +11,8 @@ from file_parsers import (
     parse_rules_file,
     parse_expiry_complementary_file,
     enrich_expiries_with_complementary_data,
-    parse_incumplimientos_file  # New import
+    parse_incumplimientos_file,
+    parse_counterparties_file
 )
 from validators import validate_day_trades, validate_mtm_entries, validate_vencimiento_entries, validate_incumplimiento_entries
 
@@ -50,7 +51,9 @@ with st.sidebar:
                                    help="Provides amortization and hedge accounting data for expiries")
     incumplimientos_file = st.file_uploader("Upload Incumplimientos File", type=["xls", "xlsx"],
                                           help="Required for INCUMPLIMIENTO validation")
-    
+    counterparties_file = st.file_uploader("Upload Counterparties File", type=["xlsx", "xls", "csv"],
+                                         help="Contains RUTs of Instituciones Financieras for INCUMPLIMIENTO validation")
+
     # Debug options
     st.subheader("Debug Options")
     debug_deal = st.text_input("Debug specific deal number (optional)", "")
@@ -130,6 +133,12 @@ if interface_file and rules_file:
     if incumplimientos_file:
         with st.expander("Incumplimientos File", expanded=False):
             incumplimientos_df = parse_incumplimientos_file(incumplimientos_file)
+
+    # Parse counterparties file
+    counterparties_df = None
+    if counterparties_file:
+        with st.expander("Counterparties File", expanded=False):
+            counterparties_df = parse_counterparties_file(counterparties_file)
 
     # MOVED: Validation options - only show available validations AFTER all parsing is complete
     st.subheader("Available Validations")
@@ -248,6 +257,7 @@ if interface_file and rules_file:
                             interface_df,
                             interface_cols,
                             rules_df,
+                            counterparties_df,
                             debug_deal=debug_deal
                         )
         else:

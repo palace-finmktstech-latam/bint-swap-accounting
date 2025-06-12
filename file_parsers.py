@@ -1042,3 +1042,109 @@ def parse_rules_file(file):
         return df_expanded
     
     return df
+
+def parse_counterparties_file(file):
+    """Parse the counterparties Excel file with Instituciones Financieras."""
+    try:
+        # Get file name for logging
+        file_name = getattr(file, 'name', 'unknown')
+        st.write(f"Attempting to parse Counterparties file: {file_name}")
+        
+        # Try different engines
+        engines_to_try = ['openpyxl', 'xlrd']
+        df_preview = None
+        df = None
+        
+        for engine in engines_to_try:
+            try:
+                st.write(f"Trying to read Counterparties file with {engine} engine...")
+                
+                # Read the Excel file with headers on first row (index 0)
+                df_preview = pd.read_excel(file, header=0, nrows=15, engine=engine)
+                
+                # Reset file pointer and read full data
+                file.seek(0)
+                df = pd.read_excel(file, header=0, engine=engine)
+                
+                st.success(f"✅ Successfully parsed Counterparties file using {engine} engine")
+                break
+                
+            except Exception as e:
+                st.warning(f"Failed with {engine} engine: {str(e)}")
+                file.seek(0)  # Reset file pointer for next attempt
+                continue
+        
+        # If all engines failed
+        if df is None or df_preview is None:
+            st.error("❌ Could not parse the Counterparties file with any Excel engine")
+            return pd.DataFrame()
+        
+        # Convert to string for display
+        df_preview_display = df_preview.astype(str)
+        st.write("Counterparties file preview (first 15 rows):")
+        st.dataframe(df_preview_display)
+        
+        # Show columns found
+        st.write("Counterparties file columns:", df.columns.tolist())
+        
+        # Check for required columns
+        required_columns = ['Rut', 'Nombre', 'Tipo']
+        
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        
+        if missing_columns:
+            st.error(f"Missing required columns in counterparties file: {', '.join(missing_columns)}")
+            
+            # Show available columns for debugging
+            st.write("Available columns:", df.columns.tolist())
+            
+            # Try to find similar column names
+            for missing_col in missing_columns:
+                possible_matches = [col for col in df.columns if missing_col.lower() in col.lower()]
+                if possible_matches:
+                    st.write(f"Possible matches for '{missing_col}': {possible_matches}")
+            
+            return pd.DataFrame()
+        
+        # Clean and standardize column names for easier processing
+        column_mapping = {
+            'Rut': 'rut',
+            'Nombre': 'nombre',
+            'Tipo': 'tipo'
+        }
+        
+        # Rename columns
+        df = df.rename(columns=column_mapping)
+        
+        # Ensure string formatting for text fields
+        df['nombre'] = df['nombre'].astype(str)
+        df['tipo'] = df['tipo'].astype(str)
+        
+        # Filter to only keep Instituciones Financieras (as mentioned in requirements)
+        df = df[df['tipo'].str.contains('Instituciones Financieras', case=False, na=False)].copy()
+        
+        # Remove any empty RUTs
+        df = df[df['rut'].str.strip() != ''].copy()
+        
+        # Display summary information
+        st.write(f"Found {len(df)} Instituciones Financieras")
+        
+        # Show tipo distribution (should all be Instituciones Financieras)
+        tipo_counts = df['tipo'].value_counts()
+        st.write("Tipo distribution:", tipo_counts.to_dict())
+        
+        # Display preview of the parsed data
+        st.subheader("Counterparties Preview")
+        st.dataframe(df.head(10), use_container_width=True)
+        
+        # Create a set of RUTs for efficient lookup
+        rut_set = set(df['rut'].str.strip().str.upper())
+        st.write(f"Created RUT lookup set with {len(rut_set)} unique RUTs")
+        
+        return df
+        
+    except Exception as e:
+        st.error(f"Error parsing counterparties file: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
+        return pd.DataFrame()

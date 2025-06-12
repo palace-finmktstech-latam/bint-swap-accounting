@@ -1186,7 +1186,7 @@ def _display_validation_results(validation_results, validation_type):
     
     return validation_df
 
-def validate_incumplimiento_entries(incumplimientos_df, interface_df, interface_cols, rules_df, debug_deal=None):
+def validate_incumplimiento_entries(incumplimientos_df, interface_df, interface_cols, rules_df, counterparties_df=None, debug_deal=None):
     """
     Validate incumplimiento entries against accounting interface entries.
     
@@ -1196,6 +1196,10 @@ def validate_incumplimiento_entries(incumplimientos_df, interface_df, interface_
     3. Transaction amounts match the incumplimiento amount
     4. Amounts are in the correct fields (debe/haber)
     5. The number of entries exactly matches what's expected from rules
+    
+    Counterparty type is determined by checking RUT against counterparties_df:
+    - If RUT found in counterparties file -> "Instituciones Financieras"
+    - If RUT not found or no counterparties file -> "Otras Instituciones"
     """
     # Filter rules for INCUMPLIMIENTO event
     incumplimiento_rules = rules_df[rules_df['event'] == 'Incumplimiento'].copy()
@@ -1206,6 +1210,14 @@ def validate_incumplimiento_entries(incumplimientos_df, interface_df, interface_
     
     st.subheader("INCUMPLIMIENTO Rules")
     st.dataframe(incumplimiento_rules, use_container_width=True, hide_index=True)
+    
+    # Create RUT lookup set from counterparties if provided
+    instituciones_financieras_ruts = set()
+    if counterparties_df is not None and not counterparties_df.empty:
+        instituciones_financieras_ruts = set(counterparties_df['rut'].astype(str).str.strip())
+        st.write(f"✅ Using counterparties file with {len(instituciones_financieras_ruts)} Instituciones Financieras RUTs")
+    else:
+        st.warning("⚠️ No counterparties file provided - all entities will be classified as 'Otras Instituciones'")
     
     # Extract needed columns from interface
     trade_number_col = next((col for col in interface_df.columns if any(x in str(col).lower() for x in ['operación', 'operacion', 'nro.'])), None)
@@ -1251,12 +1263,15 @@ def validate_incumplimiento_entries(incumplimientos_df, interface_df, interface_
         monto = incumplimiento['monto']
         moneda = incumplimiento['moneda']
         cliente = incumplimiento['nombre_cliente']
+        rut_cliente = str(incumplimiento['rut_cliente']).strip()
         
-        # FIXED: Hard-code counterparty type as "Otras Instituciones" for now
-        tipo_contraparte = "Otras Instituciones"
-        #tipo_contraparte = "Instituciones Financieras"
+        # NEW: Determine counterparty type based on RUT lookup
+        if rut_cliente in instituciones_financieras_ruts:
+            tipo_contraparte = "Instituciones Financieras"
+        else:
+            tipo_contraparte = "Otras Instituciones"
         
-        # FIXED: Map moneda_flujo based on the actual currency
+        # Map moneda_flujo based on the actual currency
         if moneda == 'CLP':
             moneda_flujo = 'CLP'
         elif moneda in ['USD', 'EUR']:
@@ -1269,8 +1284,9 @@ def validate_incumplimiento_entries(incumplimientos_df, interface_df, interface_
         # Display debug info if requested
         if debug_deal is not None:
             st.write(f"DEBUG: Processing incumplimiento {deal_number}")
+            st.write(f"DEBUG: RUT Cliente: {rut_cliente}")
+            st.write(f"DEBUG: Tipo Contraparte: {tipo_contraparte} (determined from RUT lookup)")
             st.write(f"DEBUG: Monto: {monto}, Moneda: {moneda}")
-            st.write(f"DEBUG: Tipo Contraparte: {tipo_contraparte} (hard-coded)")
             st.write(f"DEBUG: Moneda Flujo: {moneda_flujo} (mapped from {moneda})")
             st.write(f"DEBUG: Cliente: {cliente}")
         
@@ -1283,6 +1299,7 @@ def validate_incumplimiento_entries(incumplimientos_df, interface_df, interface_
             validation_results.append({
                 'deal_number': str(deal_number),
                 'cliente': cliente,
+                'rut_cliente': rut_cliente,
                 'tipo_contraparte': tipo_contraparte,
                 'moneda_flujo': moneda_flujo,
                 'moneda_original': moneda,
@@ -1301,6 +1318,7 @@ def validate_incumplimiento_entries(incumplimientos_df, interface_df, interface_
             validation_results.append({
                 'deal_number': str(deal_number),
                 'cliente': cliente,
+                'rut_cliente': rut_cliente,
                 'tipo_contraparte': tipo_contraparte,
                 'moneda_flujo': moneda_flujo,
                 'moneda_original': moneda,
@@ -1337,6 +1355,7 @@ def validate_incumplimiento_entries(incumplimientos_df, interface_df, interface_
             validation_results.append({
                 'deal_number': str(deal_number),
                 'cliente': cliente,
+                'rut_cliente': rut_cliente,
                 'tipo_contraparte': tipo_contraparte,
                 'moneda_flujo': moneda_flujo,
                 'moneda_original': moneda,
@@ -1383,6 +1402,7 @@ def validate_incumplimiento_entries(incumplimientos_df, interface_df, interface_
             validation_results.append({
                 'deal_number': str(deal_number),
                 'cliente': cliente,
+                'rut_cliente': rut_cliente,
                 'tipo_contraparte': tipo_contraparte,
                 'moneda_flujo': moneda_flujo,
                 'moneda_original': moneda,
@@ -1403,6 +1423,7 @@ def validate_incumplimiento_entries(incumplimientos_df, interface_df, interface_
             validation_results.append({
                 'deal_number': str(deal_number),
                 'cliente': cliente,
+                'rut_cliente': rut_cliente,
                 'tipo_contraparte': tipo_contraparte,
                 'moneda_flujo': moneda_flujo,
                 'moneda_original': moneda,
@@ -1418,6 +1439,7 @@ def validate_incumplimiento_entries(incumplimientos_df, interface_df, interface_
             validation_results.append({
                 'deal_number': str(deal_number),
                 'cliente': cliente,
+                'rut_cliente': rut_cliente,
                 'tipo_contraparte': tipo_contraparte,
                 'moneda_flujo': moneda_flujo,
                 'moneda_original': moneda,
@@ -1482,6 +1504,7 @@ def validate_incumplimiento_entries(incumplimientos_df, interface_df, interface_
         validation_results.append({
             'deal_number': str(deal_number),
             'cliente': cliente,
+            'rut_cliente': rut_cliente,
             'tipo_contraparte': tipo_contraparte,
             'moneda_flujo': moneda_flujo,
             'moneda_original': moneda,
@@ -1509,8 +1532,16 @@ def validate_incumplimiento_entries(incumplimientos_df, interface_df, interface_
         # Display validation results
         st.subheader("Incumplimiento Validation Results")
         st.write("Validates that incumplimiento events have corresponding entries in the accounting interface")
-        st.write("Matches rules by instrument type, counterparty type (hard-coded as 'Otras Instituciones' or blank), and flow currency (CLP=CLP, MX=USD/EUR)")
+        st.write("Counterparty type determined by RUT lookup in counterparties file:")
+        st.write("• If RUT found in counterparties → 'Instituciones Financieras'")
+        st.write("• If RUT not found → 'Otras Instituciones'")
+        st.write("Flow currency mapping: CLP→CLP, USD/EUR→MX")
         st.dataframe(validation_df, use_container_width=True, hide_index=True)
+        
+        # Show counterparty type breakdown
+        if 'tipo_contraparte' in validation_df.columns:
+            tipo_counts = validation_df['tipo_contraparte'].value_counts()
+            st.write("**Counterparty Type Distribution:**", tipo_counts.to_dict())
         
         # Calculate match statistics
         full_match_count = len(validation_df[validation_df['status'] == 'Full Match'])
