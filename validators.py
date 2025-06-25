@@ -717,35 +717,46 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
     
     return validation_df
 
-def validate_vencimiento_entries(expiries_df, interface_df, interface_cols, rules_df, debug_deal=None):
+def validate_vencimiento_entries(expiries_df, interface_df, interface_cols, rules_df, cartera_df=None, debug_deal=None):
     """
     Validate both VENCIMIENTO and TERMINO entries against accounting interface entries.
     
-    VENCIMIENTO: Validates expiry entries using Monto Override amounts
-    TERMINO: Validates capital amortization entries using Amortización amounts with Pata logic
+    VENCIMIENTO: Enhanced with Estrategia-based filtering from Cartera file
+    TERMINO: Uses existing logic (unchanged)
     
     Both validations run together since they're part of the same business process.
     """
     st.header("🔄 VENCIMIENTO & TERMINO Validation")
     
-    # Run VENCIMIENTO validation first
-    st.subheader("📅 VENCIMIENTO Validation")
-    vencimiento_results = _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_df, debug_deal)
+    # Check if Cartera file is provided (now required for enhanced VENCIMIENTO validation)
+    if cartera_df is None or cartera_df.empty:
+        st.error("❌ Cartera file is required for enhanced VENCIMIENTO validation but was not provided")
+        st.error("Please upload the Cartera Analytics file to proceed with VENCIMIENTO validation")
+        return pd.DataFrame()
     
-    # Run TERMINO validation second  
+    # Create estrategia lookup from Cartera file
+    estrategia_lookup = dict(zip(cartera_df['deal_number'], cartera_df['estrategia']))
+    st.write(f"✅ Using Cartera file with estrategia data for {len(estrategia_lookup)} deals")
+    
+    # Run VENCIMIENTO validation first (enhanced with Estrategia)
+    st.subheader("📅 VENCIMIENTO Validation")
+    vencimiento_results = _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_df, estrategia_lookup, debug_deal)
+    
+    # Run TERMINO validation second (unchanged - no Estrategia filtering needed)
     st.subheader("🔚 TERMINO Validation")
     termino_results = _validate_termino_only(expiries_df, interface_df, interface_cols, rules_df, debug_deal)
     
-    # Return both results (you could combine them if needed)
+    # Return both results
     return {
         'vencimiento': vencimiento_results,
         'termino': termino_results
     }
 
-def _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_df, debug_deal=None):
+def _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_df, estrategia_lookup, debug_deal=None):
     """
     Validate VENCIMIENTO (expiry) entries - the payment/settlement part.
     Uses Monto Override Extranjero/Local amounts.
+    Enhanced with Estrategia-based rule filtering.
     """
     # Filter rules for VENCIMIENTO event
     vencimiento_rules = rules_df[rules_df['event'] == 'Vencimiento'].copy()
@@ -758,6 +769,15 @@ def _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_
     if debug_deal is not None:
         st.dataframe(vencimiento_rules, use_container_width=True, hide_index=True)
     
+    # Check if rules have required columns
+    required_rule_columns = ['coverage', 'Estrategia']
+    missing_rule_columns = [col for col in required_rule_columns if col not in vencimiento_rules.columns]
+    
+    if missing_rule_columns:
+        st.error(f"❌ Missing required columns in VENCIMIENTO rules file: {', '.join(missing_rule_columns)}")
+        st.error("Rules file must contain both 'coverage' and 'Estrategia' columns for enhanced VENCIMIENTO validation")
+        return pd.DataFrame()
+    
     # Extract needed columns from interface
     trade_number_col = next((col for col in interface_df.columns if any(x in str(col).lower() for x in ['operación', 'operacion', 'nro.'])), None)
     
@@ -769,9 +789,6 @@ def _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_
         st.error("Could not find trade number column in interface file")
         return pd.DataFrame()
     
-    st.write("DEBUG HERE:")
-    st.dataframe(expiries_df, use_container_width=True, hide_index=True)
-
     # Filter interface for "Vcto" event_type entries (both VENCIMIENTO and TERMINO share this)
     vcto_entries = interface_df[interface_df['event_type'] == 'Vcto'].copy()
     st.write(f"Found {len(vcto_entries)} Vcto entries in interface file (shared by VENCIMIENTO and TERMINO)")
@@ -783,7 +800,10 @@ def _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_
     # Prepare validation results
     validation_results = []
     
-    st.write(f"Processing {len(expiries_df)} trades for VENCIMIENTO validation")
+    # Track anomalies
+    cartera_anomalies = []
+    
+    st.write(f"Processing {len(expiries_df)} trades for enhanced VENCIMIENTO validation")
     
     # Process each expiring trade
     for _, expiry in expiries_df.iterrows():
@@ -795,6 +815,30 @@ def _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_
             
         instrument_type = expiry.get('instrument_type', 'Unknown')
         settlement_currency = expiry.get('Moneda Liquidación', 'Unknown')
+        
+        # NEW: Get estrategia from Cartera file
+        normalized_deal = int(float(str(trade_number)))
+        estrategia = estrategia_lookup.get(normalized_deal)
+        
+        if estrategia is None:
+            # Handle missing deal in Cartera file - mark as anomaly and skip
+            cartera_anomalies.append({
+                'deal_number': str(trade_number),
+                'instrument_type': instrument_type,
+                'issue': f'Deal {trade_number} not found in Cartera file'
+            })
+            
+            validation_results.append({
+                'trade_number': str(trade_number),
+                'instrument_type': instrument_type,
+                'validation_type': 'VENCIMIENTO',
+                'estrategia': 'MISSING',
+                'status': 'Cartera Anomaly',
+                'interface_entries': 0,
+                'expected_entries': 0,
+                'issue': f'Deal {trade_number} not found in Cartera file - cannot determine estrategia'
+            })
+            continue
         
         # Get the override amounts and handle NaN/null values
         monto_extranjero = expiry.get('Monto Override Extranjero', 0)
@@ -817,7 +861,7 @@ def _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_
         except (ValueError, TypeError):
             monto_local = 0
         
-        # Get Cobertura from expiries file
+        # Get Cobertura from expiries file (for backward compatibility)
         cobertura = expiry.get('Cobertura', 'No')
         
         # Determine direction and amount
@@ -837,31 +881,47 @@ def _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_
         # Display debug info if requested
         if debug_deal is not None:
             st.write(f"DEBUG VENCIMIENTO: Processing expiry {trade_number}, instrument: {instrument_type}")
+            st.write(f"DEBUG VENCIMIENTO: Estrategia from Cartera: {estrategia}")
             st.write(f"DEBUG VENCIMIENTO: Monto Extranjero: {monto_extranjero}, Monto Local: {monto_local}")
             st.write(f"DEBUG VENCIMIENTO: Cobertura: {cobertura}, Direction: {direction}, Using amount: {amount_to_use} (from {amount_source})")
         
-        # Get applicable rules
-        applicable_rules = vencimiento_rules[
-            (vencimiento_rules['subproduct'] == instrument_type) & 
-            (vencimiento_rules['coverage'] == cobertura) &
-            (vencimiento_rules['direction'] == direction)
-        ]
+        # NEW: Apply Estrategia/Coverage filtering logic
+        if estrategia == "NO":
+            # Filter by coverage column where value is "No"
+            applicable_rules = vencimiento_rules[
+                (vencimiento_rules['subproduct'] == instrument_type) & 
+                (vencimiento_rules['coverage'] == 'No') &
+                (vencimiento_rules['direction'] == direction)
+            ]
+            filter_criteria = f"coverage='No'"
+        else:
+            # Filter by Estrategia column where value matches the estrategia from Cartera
+            applicable_rules = vencimiento_rules[
+                (vencimiento_rules['subproduct'] == instrument_type) & 
+                (vencimiento_rules['Estrategia'] == estrategia) &
+                (vencimiento_rules['direction'] == direction)
+            ]
+            filter_criteria = f"Estrategia='{estrategia}'"
         
         if len(applicable_rules) == 0:
             validation_results.append({
                 'trade_number': str(trade_number),
                 'instrument_type': instrument_type,
                 'validation_type': 'VENCIMIENTO',
-                'cobertura': cobertura,
+                'estrategia': estrategia,
                 'direction': direction,
                 'amount_used': amount_to_use,
                 'amount_source': amount_source,
                 'status': 'Missing Rule',
                 'interface_entries': 0,
                 'expected_entries': 0,
-                'issue': f'No VENCIMIENTO rule found for {instrument_type} with Cobertura={cobertura}, Direction={direction}'
+                'issue': f'No VENCIMIENTO rule found for {instrument_type} with {filter_criteria}, Direction={direction}'
             })
             continue
+        
+        if debug_deal is not None:
+            st.write(f"DEBUG VENCIMIENTO: Found {len(applicable_rules)} applicable rules using filter: {filter_criteria}")
+            st.dataframe(applicable_rules, use_container_width=True, hide_index=True)
         
         # Build expected accounts (simple logic - no Pata for VENCIMIENTO)
         expected_accounts = []
@@ -896,7 +956,7 @@ def _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_
             if len(vencimiento_entries) > 0:
                 st.dataframe(vencimiento_entries, use_container_width=True, hide_index=True)
         
-        # Validation logic (similar to previous implementation)
+        # Validation logic
         status, issue = _validate_entries_against_expected(
             vencimiento_entries, expected_accounts, expected_amounts, 
             account_col, debit_col, credit_col, debug_deal, "VENCIMIENTO"
@@ -906,7 +966,7 @@ def _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_
             'trade_number': str(trade_number),
             'instrument_type': instrument_type,
             'validation_type': 'VENCIMIENTO',
-            'cobertura': cobertura,
+            'estrategia': estrategia,
             'direction': direction,
             'amount_used': amount_to_use,
             'amount_source': amount_source,
@@ -916,8 +976,77 @@ def _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_
             'issue': issue
         })
     
+    # Display Cartera anomalies if any
+    if cartera_anomalies:
+        st.error(f"⚠️ Found {len(cartera_anomalies)} expiry deals that are missing from Cartera file:")
+        anomaly_df = pd.DataFrame(cartera_anomalies)
+        st.dataframe(anomaly_df, use_container_width=True, hide_index=True)
+    
     # Display results
-    return _display_validation_results(validation_results, "VENCIMIENTO")
+    return _display_validation_results_with_estrategia(validation_results, "VENCIMIENTO")
+
+def _display_validation_results_with_estrategia(validation_results, validation_type):
+    """Helper function to display validation results with Estrategia information"""
+    validation_df = pd.DataFrame(validation_results)
+    
+    if len(validation_df) > 0:
+        # Format for display
+        for col in validation_df.columns:
+            if validation_df[col].dtype == 'object':
+                validation_df[col] = validation_df[col].astype(str)
+        
+        # Round numeric columns
+        numeric_cols = validation_df.select_dtypes(include=['float64', 'int64']).columns
+        for col in numeric_cols:
+            validation_df[col] = validation_df[col].round(2)
+        
+        # Display validation results
+        st.write(f"Enhanced {validation_type} validation using Estrategia/Coverage filtering:")
+        st.write(f"• If Estrategia='NO' → Filter rules by coverage='No'")
+        st.write(f"• If Estrategia≠'NO' → Filter rules by Estrategia=estrategia_value")
+        st.write("Uses whichever override amount is non-zero (Extranjero or Local)")
+        st.write("Matches rules by instrument type, estrategia/coverage, and direction")
+        
+        st.dataframe(validation_df, use_container_width=True, hide_index=True)
+        
+        # Show estrategia distribution
+        if 'estrategia' in validation_df.columns:
+            estrategia_counts = validation_df['estrategia'].value_counts()
+            st.write("**Estrategia Distribution:**", estrategia_counts.to_dict())
+        
+        # Calculate match statistics
+        full_match_count = len(validation_df[validation_df['status'] == 'Full Match'])
+        anomaly_count = len(validation_df[validation_df['status'] == 'Cartera Anomaly'])
+        total_count = len(validation_df)
+        match_percentage = (full_match_count / total_count * 100) if total_count > 0 else 0
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric(f"Total {validation_type}", total_count)
+        with col2:
+            st.metric("Full Matches", full_match_count)
+        with col3:
+            st.metric("Anomalies", anomaly_count)
+        with col4:
+            st.metric("Match Rate", f"{match_percentage:.1f}%")
+        
+        # Status breakdown
+        status_counts = validation_df['status'].value_counts().to_dict()
+        st.write(f"**{validation_type} Status Breakdown:**", status_counts)
+        
+        # Download results
+        csv = validation_df.to_csv().encode('utf-8')
+        st.download_button(
+            f"Download {validation_type} Validation Results",
+            csv,
+            f"{validation_type.lower()}_validation_results.csv",
+            "text/csv",
+            key=f"download-csv-{validation_type.lower()}"
+        )
+    else:
+        st.warning(f"No {validation_type} validation results generated")
+    
+    return validation_df
 
 def _validate_termino_only(expiries_df, interface_df, interface_cols, rules_df, debug_deal=None):
     """

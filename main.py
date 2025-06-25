@@ -69,7 +69,7 @@ st.sidebar.markdown("""
 **Day Trades Validation**: Interface + Rules + Day Trades files  
 **MTM Valorization**: Interface + Rules + MTM (T) + Cartera files  
 **MTM Reversal**: Interface + Rules + MTM (T-1) + Cartera files  
-**VENCIMIENTO Validation**: Interface + Rules + Expiries files  
+**VENCIMIENTO Validation**: Interface + Rules + Expiries + Cartera files  
 **Enhanced VENCIMIENTO**: Also upload Expiry Complementary Data for complete data  
 **INCUMPLIMIENTO Validation**: Interface + Rules + Incumplimientos + Counterparties files
 
@@ -158,7 +158,7 @@ if interface_file and rules_file:
     can_validate_day_trades = day_trades_df is not None and not day_trades_df.empty
     can_validate_mtm = mtm_df is not None and not mtm_df.empty and cartera_df is not None and not cartera_df.empty
     can_validate_reversal = mtm_t1_df is not None and not mtm_t1_df.empty and cartera_df is not None and not cartera_df.empty
-    can_validate_vencimiento = expiries_file is not None  # Just check if file is uploaded, not the processed df
+    can_validate_vencimiento = expiries_file is not None and cartera_df is not None and not cartera_df.empty
     can_validate_incumplimiento = incumplimientos_df is not None and not incumplimientos_df.empty
     
     if not any([can_validate_day_trades, can_validate_mtm, can_validate_reversal, can_validate_vencimiento, can_validate_incumplimiento]):
@@ -201,7 +201,7 @@ if interface_file and rules_file:
                 run_vencimiento_validation = st.checkbox("✅ Run VENCIMIENTO Validation", value=True)
             else:
                 st.checkbox("❌ Run VENCIMIENTO Validation", value=False, disabled=True)
-                st.caption("Requires Expiries file")
+                st.caption("Requires Expiries and Cartera files")
                 run_vencimiento_validation = False
         
         # Run validations button - only show if at least one validation is selected
@@ -259,6 +259,7 @@ if interface_file and rules_file:
                             interface_df,
                             interface_cols,
                             rules_df,
+                            cartera_df,
                             debug_deal=debug_deal
                         )
                     
