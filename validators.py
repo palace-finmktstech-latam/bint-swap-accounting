@@ -942,21 +942,20 @@ def _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_
         expected_entry_count = len(expected_accounts)
         
         # Find interface entries for this trade
-        
-        # NEW: Build comprehensive list of all possible VENCIMIENTO accounts from ALL rules
-        all_possible_vencimiento_accounts = set()
-        for _, rule in vencimiento_rules.iterrows():
-            if pd.notna(rule['debit_account']):
-                all_possible_vencimiento_accounts.add(str(rule['debit_account']))
-            if pd.notna(rule['credit_account']):
-                all_possible_vencimiento_accounts.add(str(rule['credit_account']))
-
-        # Find interface entries for this trade
         trade_entries = vcto_entries[vcto_entries[trade_number_col] == trade_number]
 
-        # Filter to only VENCIMIENTO entries (using the comprehensive account list)
+        # NEW: Build TERMINO accounts list to exclude them
+        termino_rules = rules_df[rules_df['event'] == 'Termino'].copy()
+        all_possible_termino_accounts = set()
+        for _, rule in termino_rules.iterrows():
+            if pd.notna(rule['debit_account']):
+                all_possible_termino_accounts.add(str(rule['debit_account']))
+            if pd.notna(rule['credit_account']):
+                all_possible_termino_accounts.add(str(rule['credit_account']))
+
+        # Filter to VENCIMIENTO entries: include accounts that are NOT TERMINO accounts
         vencimiento_entries = trade_entries[
-            trade_entries[account_col].astype(str).isin(all_possible_vencimiento_accounts)
+            ~trade_entries[account_col].astype(str).isin(all_possible_termino_accounts)
         ]
         
         if debug_deal is not None:
