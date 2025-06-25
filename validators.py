@@ -942,13 +942,22 @@ def _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_
         expected_entry_count = len(expected_accounts)
         
         # Find interface entries for this trade
-        trade_entries = vcto_entries[vcto_entries[trade_number_col] == trade_number]
         
-        # Filter to only entries that match our expected accounts (to separate VENCIMIENTO from TERMINO)
-        if len(expected_accounts) > 0:
-            vencimiento_entries = trade_entries[trade_entries[account_col].astype(str).isin(expected_accounts)]
-        else:
-            vencimiento_entries = pd.DataFrame()
+        # NEW: Build comprehensive list of all possible VENCIMIENTO accounts from ALL rules
+        all_possible_vencimiento_accounts = set()
+        for _, rule in vencimiento_rules.iterrows():
+            if pd.notna(rule['debit_account']):
+                all_possible_vencimiento_accounts.add(str(rule['debit_account']))
+            if pd.notna(rule['credit_account']):
+                all_possible_vencimiento_accounts.add(str(rule['credit_account']))
+
+        # Find interface entries for this trade
+        trade_entries = vcto_entries[vcto_entries[trade_number_col] == trade_number]
+
+        # Filter to only VENCIMIENTO entries (using the comprehensive account list)
+        vencimiento_entries = trade_entries[
+            trade_entries[account_col].astype(str).isin(all_possible_vencimiento_accounts)
+        ]
         
         if debug_deal is not None:
             st.write(f"DEBUG VENCIMIENTO: Found {len(vencimiento_entries)} VENCIMIENTO entries for trade {trade_number}")
@@ -957,7 +966,7 @@ def _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_
                 st.dataframe(vencimiento_entries, use_container_width=True, hide_index=True)
         
         # Validation logic
-        status, issue = _validate_entries_against_expected(
+        status, issue, extra_entry_count = _validate_entries_against_expected(
             vencimiento_entries, expected_accounts, expected_amounts, 
             account_col, debit_col, credit_col, debug_deal, "VENCIMIENTO"
         )
@@ -973,6 +982,7 @@ def _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_
             'status': status,
             'interface_entries': len(vencimiento_entries),
             'expected_entries': expected_entry_count,
+            'extra_entries': extra_entry_count,
             'issue': issue
         })
     
@@ -1227,13 +1237,17 @@ def _validate_termino_only(expiries_df, interface_df, interface_cols, rules_df, 
 
 def _validate_entries_against_expected(entries_df, expected_accounts, expected_amounts, 
                                      account_col, debit_col, credit_col, debug_deal, validation_type):
-    """Helper function for simple validation (VENCIMIENTO)"""
+    """Helper function for simple validation (VENCIMIENTO) - NOW WITH EXTRA ENTRY DETECTION"""
     if len(entries_df) == 0:
-        return 'Missing Entries', f'No {validation_type} entries found in interface'
+        return 'Missing Entries', f'No {validation_type} entries found in interface', 0
     
     expected_entry_count = len(expected_accounts)
+    
+    # NEW: Calculate extra entries
+    extra_entry_count = max(0, len(entries_df) - expected_entry_count)
+    
     if len(entries_df) != expected_entry_count:
-        return 'Entry Count Mismatch', f'Expected {expected_entry_count} entries, found {len(entries_df)}'
+        return 'Entry Count Mismatch', f'Expected {expected_entry_count} entries, found {len(entries_df)}', extra_entry_count
     
     # Check accounts
     found_accounts = entries_df[account_col].astype(str).unique().tolist()
@@ -1241,9 +1255,9 @@ def _validate_entries_against_expected(entries_df, expected_accounts, expected_a
     extra_accounts = [acc for acc in found_accounts if acc not in expected_accounts]
     
     if missing_accounts:
-        return 'Missing Accounts', f'Missing expected accounts: {", ".join(missing_accounts)}'
+        return 'Missing Accounts', f'Missing expected accounts: {", ".join(missing_accounts)}', extra_entry_count
     if extra_accounts:
-        return 'Extra Accounts', f'Found unexpected accounts: {", ".join(extra_accounts)}'
+        return 'Extra Accounts', f'Found unexpected accounts: {", ".join(extra_accounts)}', extra_entry_count
     
     # Check amounts
     all_match = True
@@ -1271,9 +1285,10 @@ def _validate_entries_against_expected(entries_df, expected_accounts, expected_a
                 st.warning(f"✗ {validation_type} Account {account} ({expected_field}): Expected {expected_amount}, Found {actual_amount:.2f}")
     
     if all_match:
-        return 'Full Match', ''
+        return 'Full Match', '', extra_entry_count
     else:
-        return 'Amount Mismatch', f"Amount mismatches: {'; '.join(mismatches)}"
+        return 'Amount Mismatch', f"Amount mismatches: {'; '.join(mismatches)}", extra_entry_count
+
 
 def _validate_entries_against_expected_with_pata(entries_df, expected_accounts, expected_amounts, 
                                                account_col, debit_col, credit_col, debug_deal, validation_type):
