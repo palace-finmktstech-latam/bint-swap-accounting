@@ -318,7 +318,7 @@ def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, d
     
     return validation_df
 
-def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_df, 
+def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_df, cartera_df=None,
                           event_type='Valorización MTM', 
                           rules_event_type=None,
                           key_suffix='', 
@@ -327,21 +327,16 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
     # Use rules_event_type if provided, otherwise default to event_type
     filter_event = rules_event_type if rules_event_type else event_type
     
-    # DEBUGGING
-    #st.write(f"Filter event: {filter_event}")
-
     # Filter rules using the appropriate event type
     mtm_rules = rules_df[rules_df['event'] == filter_event].copy()
-
-    # DEBUGGING
-    #st.write(f"MTM rules: {mtm_rules}")
     
     """
     Validate MTM entries against expected entries from rules:
-    1. Identify expected entries from rules
+    1. Identify expected entries from rules using Estrategia/Cobertura filtering
     2. Get MTM values from MTM file
-    3. Match with accounting interface entries
-    4. Report on full, partial or non-matches
+    3. Get Estrategia from Cartera file for each deal
+    4. Match with accounting interface entries
+    5. Report on full, partial or non-matches
     """
     if debug_deal is not None:
         st.write(f"DEBUG: Analyzing deal number {debug_deal}")
@@ -354,6 +349,25 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
     
     if len(mtm_rules) == 0:
         st.error(f"No {event_type} rules found in rules file")
+        return pd.DataFrame()
+    
+    # Check if Cartera file is provided (now required)
+    if cartera_df is None or cartera_df.empty:
+        st.error("❌ Cartera file is required for MTM validation but was not provided")
+        st.error("Please upload the Cartera Analytics file to proceed with MTM validation")
+        return pd.DataFrame()
+    
+    # Create estrategia lookup from Cartera file
+    estrategia_lookup = dict(zip(cartera_df['deal_number'], cartera_df['estrategia']))
+    st.write(f"✅ Using Cartera file with estrategia data for {len(estrategia_lookup)} deals")
+    
+    # Check if rules have required columns (using existing column names)
+    required_rule_columns = ['coverage', 'Estrategia']
+    missing_rule_columns = [col for col in required_rule_columns if col not in mtm_rules.columns]
+    
+    if missing_rule_columns:
+        st.error(f"❌ Missing required columns in rules file: {', '.join(missing_rule_columns)}")
+        st.error("Rules file must contain both 'coverage' and 'Estrategia' columns for MTM validation")
         return pd.DataFrame()
     
     # Find required columns
@@ -396,6 +410,9 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
     # Initialize validation results
     validation_results = []
     
+    # Track anomalies
+    cartera_anomalies = []
+    
     # Process each deal from MTM file
     for _, deal_row in mtm_sums.iterrows():
         deal_number = deal_row['deal_number']
@@ -427,14 +444,54 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
                 st.warning(f"Unknown product code: {product_code} for deal {deal_number}")
             continue
         
+        # NEW: Get estrategia from Cartera file
+        estrategia = estrategia_lookup.get(normalized_deal)
+        
+        if estrategia is None:
+            # Handle missing deal in Cartera file - mark as anomaly and skip
+            cartera_anomalies.append({
+                'deal_number': str(deal_number),
+                'instrument_type': instrument_type,
+                'direction': direction,
+                'mtm_value': mtm_abs,
+                'issue': f'Deal {deal_number} not found in Cartera file'
+            })
+            
+            validation_results.append({
+                'deal_number': str(deal_number),
+                'instrument_type': instrument_type,
+                'direction': direction,
+                'mtm_value': mtm_abs,
+                'estrategia': 'MISSING',
+                'status': 'Cartera Anomaly',
+                'interface_entries': 0,
+                'matched_entries': 0,
+                'expected_accounts': 0,
+                'issue': f'Deal {deal_number} not found in Cartera file - cannot determine estrategia'
+            })
+            continue
+        
         if debug_deal is not None:
             st.write(f"DEBUG: Processing deal {deal_number}, instrument: {instrument_type}, direction: {direction}, MTM: {mtm_abs:.2f}")
+            st.write(f"DEBUG: Estrategia from Cartera: {estrategia}")
         
-        # STEP 1: Find applicable rules
-        applicable_rules = mtm_rules[
-            (mtm_rules['subproduct'] == instrument_type) & 
-            (mtm_rules['direction'].str.upper() == direction)
-        ]
+        # NEW: Apply Estrategia/Cobertura filtering logic
+        if estrategia == "NO":
+            # Filter by coverage column where value is "No"
+            applicable_rules = mtm_rules[
+                (mtm_rules['subproduct'] == instrument_type) & 
+                (mtm_rules['direction'].str.upper() == direction) &
+                (mtm_rules['coverage'] == 'No')
+            ]
+            filter_criteria = f"coverage='No'"
+        else:
+            # Filter by Estrategia column where value matches the estrategia from Cartera
+            applicable_rules = mtm_rules[
+                (mtm_rules['subproduct'] == instrument_type) & 
+                (mtm_rules['direction'].str.upper() == direction) &
+                (mtm_rules['Estrategia'] == estrategia)
+            ]
+            filter_criteria = f"Estrategia='{estrategia}'"
         
         if len(applicable_rules) == 0:
             validation_results.append({
@@ -442,17 +499,17 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
                 'instrument_type': instrument_type,
                 'direction': direction,
                 'mtm_value': mtm_abs,
+                'estrategia': estrategia,
                 'status': 'Missing Rule',
                 'interface_entries': 0,
                 'matched_entries': 0,
-                'issue': f'No rule found for {instrument_type} with direction {direction}'
+                'expected_accounts': 0,
+                'issue': f'No rule found for {instrument_type} with direction {direction} and {filter_criteria}'
             })
             continue
         
         if debug_deal is not None:
-            # DEBUGGING
-            st.write(f"debug_deal: {debug_deal}")
-            st.write(f"Found {len(applicable_rules)} applicable rules:")
+            st.write(f"DEBUG: Found {len(applicable_rules)} applicable rules using filter: {filter_criteria}")
             st.dataframe(applicable_rules, use_container_width=True, hide_index=True)
         
         # STEP 2: Extract expected accounts from rules
@@ -485,18 +542,9 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
         # STEP 3: Find matching entries in the interface file
         # Filter by trade number
         deal_number = int(float(str(deal_number)))
-        #st.write(f"deal_number type: {type(deal_number)}, value: {deal_number}")
-        #st.write(f"trade_number_col values type: {type(mtm_entries[trade_number_col].iloc[0])}")
         deal_entries = mtm_entries[
             (mtm_entries[trade_number_col] == deal_number)
         ]
-        
-        # DEBUGGING
-        #st.write(f"Deal number: {deal_number}")
-        #st.write("First 5 rows of mtm_entries:")
-        #st.dataframe(mtm_entries.head())
-        #st.write(f"trade_number_col: {trade_number_col}")
-        #st.write(f"Deal entries: {deal_entries}")
 
         if debug_deal is not None:
             st.write(f"Found {len(deal_entries)} entries for deal {deal_number} in interface file")
@@ -509,9 +557,11 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
                 'instrument_type': instrument_type,
                 'direction': direction,
                 'mtm_value': mtm_abs,
+                'estrategia': estrategia,
                 'status': 'Missing Entries',
                 'interface_entries': 0,
                 'matched_entries': 0,
+                'expected_accounts': len(expected_accounts),
                 'issue': f'No entries found in interface file for deal {deal_number}'
             })
             continue
@@ -586,12 +636,19 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
             'instrument_type': instrument_type,
             'direction': direction,
             'mtm_value': mtm_abs,
+            'estrategia': estrategia,
             'status': status,
             'interface_entries': len(deal_entries),
             'matched_entries': value_matched_entries,
             'expected_accounts': len(expected_accounts),
             'issue': issue
         })
+    
+    # Display Cartera anomalies if any
+    if cartera_anomalies:
+        st.error(f"⚠️ Found {len(cartera_anomalies)} deals in MTM file that are missing from Cartera file:")
+        anomaly_df = pd.DataFrame(cartera_anomalies)
+        st.dataframe(anomaly_df, use_container_width=True, hide_index=True)
     
     # Create validation results dataframe
     validation_df = pd.DataFrame(validation_results)
@@ -609,18 +666,27 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
         
         # Display validation results
         st.subheader(f"{event_type} Validation Results")
+        st.write(f"Enhanced validation using Estrategia/Coverage filtering:")
+        st.write(f"• If Estrategia='NO' → Filter rules by coverage='No'")
+        st.write(f"• If Estrategia≠'NO' → Filter rules by Estrategia='{estrategia}'")
         st.write(f"Matches made on combination of trade number, debe/haber, account number and MTM value. Partial matches are considered where the first three elements match but the MTM value does not. A match is considered valid when the MTM value difference is less than 1.0 (absolute value).")
         st.dataframe(validation_df, use_container_width=True, hide_index=True)
+        
+        # Show estrategia distribution
+        if 'estrategia' in validation_df.columns:
+            estrategia_counts = validation_df['estrategia'].value_counts()
+            st.write("**Estrategia Distribution:**", estrategia_counts.to_dict())
         
         # Calculate and display match statistics
         full_match_count = len(validation_df[validation_df['status'] == 'Full Match'])
         partial_match_count = len(validation_df[validation_df['status'] == 'Partial Match'])
         no_match_count = len(validation_df[validation_df['status'] == 'No Match'])
+        anomaly_count = len(validation_df[validation_df['status'] == 'Cartera Anomaly'])
         total_count = len(validation_df)
         
         match_percentage = (full_match_count / total_count * 100) if total_count > 0 else 0
         
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         with col1:
             st.metric("Total Deals", total_count)
         with col2:
@@ -628,6 +694,8 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
         with col3:
             st.metric("Partial Matches", partial_match_count)
         with col4:
+            st.metric("Anomalies", anomaly_count)
+        with col5:
             st.metric("Match Rate", f"{match_percentage:.1f}%")
         
         # Status breakdown
@@ -647,7 +715,7 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
     else:
         st.warning(f"No {event_type} validation results generated")
     
-    return validation_df 
+    return validation_df
 
 def validate_vencimiento_entries(expiries_df, interface_df, interface_cols, rules_df, debug_deal=None):
     """

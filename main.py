@@ -12,7 +12,8 @@ from file_parsers import (
     parse_expiry_complementary_file,
     enrich_expiries_with_complementary_data,
     parse_incumplimientos_file,
-    parse_counterparties_file
+    parse_counterparties_file,
+    parse_cartera_file
 )
 from validators import validate_day_trades, validate_mtm_entries, validate_vencimiento_entries, validate_incumplimiento_entries
 
@@ -45,6 +46,8 @@ with st.sidebar:
                                help="Required for MTM Valorization validation")
     mtm_t1_file = st.file_uploader("Upload MTM File (T-1)", type=["xlsx", "csv"], 
                                  help="Required for MTM Reversal validation")
+    cartera_file = st.file_uploader("Upload Cartera Analytics File", type=["csv", "xlsx"],
+                                   help="Contains deal numbers and estrategia (hedge accounting) info for MTM validation")
     expiries_file = st.file_uploader("Upload Expiries File", type=["xls", "xlsx"], 
                                  help="Required for VENCIMIENTO validation")                             
     expiry_complementary_file = st.file_uploader("Upload Expiry Complementary Data", type=["xlsx", "xls"],
@@ -53,7 +56,7 @@ with st.sidebar:
                                           help="Required for INCUMPLIMIENTO validation")
     counterparties_file = st.file_uploader("Upload Counterparties File", type=["xlsx", "xls", "csv"],
                                          help="Contains RUTs of Instituciones Financieras for INCUMPLIMIENTO validation")
-
+    
     # Debug options
     st.subheader("Debug Options")
     debug_deal = st.text_input("Debug specific deal number (optional)", "")
@@ -64,11 +67,13 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("File Requirements")
 st.sidebar.markdown("""
 **Day Trades Validation**: Interface + Rules + Day Trades files  
-**MTM Valorization**: Interface + Rules + MTM (T) files  
-**MTM Reversal**: Interface + Rules + MTM (T-1) files  
+**MTM Valorization**: Interface + Rules + MTM (T) + Cartera files  
+**MTM Reversal**: Interface + Rules + MTM (T-1) + Cartera files  
 **VENCIMIENTO Validation**: Interface + Rules + Expiries files  
 **Enhanced VENCIMIENTO**: Also upload Expiry Complementary Data for complete data  
-**INCUMPLIMIENTO Validation**: Interface + Rules + Incumplimientos files
+**INCUMPLIMIENTO Validation**: Interface + Rules + Incumplimientos + Counterparties files
+
+*Note: Cartera file provides estrategia (hedge accounting) data for enhanced MTM validation*
 """)
 
 # Main area - only show if core files are uploaded
@@ -99,6 +104,12 @@ if interface_file and rules_file:
     if day_trades_file:
         with st.expander("Day Trades File", expanded=False):
             day_trades_df = parse_day_trades_file(day_trades_file)
+    
+    # Parse cartera file
+    cartera_df = None
+    if cartera_file:
+        with st.expander("Cartera Analytics File", expanded=False):
+            cartera_df = parse_cartera_file(cartera_file)
             
     # Parse complementary data first
     expiry_complementary_df = None
@@ -145,8 +156,8 @@ if interface_file and rules_file:
     
     # Check what validations are possible - NOW all dataframes are properly set
     can_validate_day_trades = day_trades_df is not None and not day_trades_df.empty
-    can_validate_mtm = mtm_df is not None and not mtm_df.empty
-    can_validate_reversal = mtm_t1_df is not None and not mtm_t1_df.empty
+    can_validate_mtm = mtm_df is not None and not mtm_df.empty and cartera_df is not None and not cartera_df.empty
+    can_validate_reversal = mtm_t1_df is not None and not mtm_t1_df.empty and cartera_df is not None and not cartera_df.empty
     can_validate_vencimiento = expiries_file is not None  # Just check if file is uploaded, not the processed df
     can_validate_incumplimiento = incumplimientos_df is not None and not incumplimientos_df.empty
     
@@ -168,7 +179,7 @@ if interface_file and rules_file:
                 run_mtm_validation = st.checkbox("✅ Run MTM Valorization Validation", value=True)
             else:
                 st.checkbox("❌ Run MTM Valorization Validation", value=False, disabled=True)
-                st.caption("Requires MTM (T) file")
+                st.caption("Requires MTM (T) and Cartera files")
                 run_mtm_validation = False
             
             if can_validate_incumplimiento:
@@ -183,7 +194,7 @@ if interface_file and rules_file:
                 run_reversal_validation = st.checkbox("✅ Run MTM Reversal Validation", value=True)
             else:
                 st.checkbox("❌ Run MTM Reversal Validation", value=False, disabled=True)
-                st.caption("Requires MTM (T-1) file")
+                st.caption("Requires MTM (T-1) and Cartera files")
                 run_reversal_validation = False
                 
             if can_validate_vencimiento:
@@ -219,6 +230,7 @@ if interface_file and rules_file:
                             mtm_df, 
                             mtm_sums, 
                             rules_df, 
+                            cartera_df,
                             event_type='Valorización MTM',
                             debug_deal=debug_deal
                         )
@@ -232,6 +244,7 @@ if interface_file and rules_file:
                             mtm_t1_df, 
                             mtm_t1_sums, 
                             rules_df, 
+                            cartera_df,
                             event_type='Valorización MTM',      # For interface file filtering
                             rules_event_type='Reversa Valorización MTM',  # For rules file filtering
                             key_suffix='-reversal',
@@ -278,7 +291,9 @@ else:
     - **Day Trades File**: For validating new trades entered today
     - **MTM File (T)**: For validating current day's MTM valorization
     - **MTM File (T-1)**: For validating reversal of previous day's MTM
+    - **Cartera Analytics File**: Provides estrategia (hedge accounting) data for MTM validation
     - **Expiries File**: For validating VENCIMIENTO entries
     - **Expiry Complementary Data**: Provides amortization and hedge accounting data for enhanced VENCIMIENTO validation
     - **Incumplimientos File**: For validating INCUMPLIMIENTO entries
+    - **Counterparties File**: Contains RUTs of Instituciones Financieras for INCUMPLIMIENTO validation
     """)
