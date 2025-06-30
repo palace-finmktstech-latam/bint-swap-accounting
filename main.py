@@ -19,16 +19,16 @@ from validators import validate_day_trades, validate_mtm_entries, validate_venci
 
 # Streamlit page configuration
 st.set_page_config(
-    page_title="Accounting Interface Validator",
+    page_title="Swap Accounting Interface Validator",
     layout="wide",
     initial_sidebar_state="expanded",
     menu_items={
-        "About": "Accounting Interface Validator for Non-Hedge Swaps"
+        "About": "Swap Accounting Interface Validator"
     }
 )
 
 # Streamlit UI
-st.title("Accounting Interface Validator for Non-Hedge Swaps")
+st.title("Swap Accounting Interface Validator")
 
 with st.sidebar:
     st.header("Upload Files")
