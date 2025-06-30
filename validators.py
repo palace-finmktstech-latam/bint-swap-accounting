@@ -331,19 +331,21 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
     mtm_rules = rules_df[rules_df['event'] == filter_event].copy()
     
     """
-    Validate MTM entries against expected entries from rules:
-    1. Identify expected entries from rules using Estrategia/Cobertura filtering
-    2. Get MTM values from MTM file
-    3. Get Estrategia from Cartera file for each deal
-    4. Match with accounting interface entries
-    5. Report on full, partial or non-matches
-    NOW WITH STRICT VALIDATION: Detects extra entries beyond what rules specify.
+    Enhanced MTM validation with separated core vs extra entry checking.
+    
+    Status categories:
+    - Full Match: Required entries correct, no extras
+    - Correct + Extra Entries: Required entries correct, but unnecessary extras exist  
+    - Amount Mismatch: Required entries have wrong amounts
+    - Missing Accounts: Required accounts missing
+    - Missing Entries: No entries found
+    - Cartera Anomaly: Deal not in Cartera file
     """
     if debug_deal is not None:
         st.write(f"DEBUG: Analyzing deal number {debug_deal}")
     
     st.write(f"Found {len(mtm_rules)} {event_type} rules")
-    st.write(f"Processing MTM validation with strict entry checking")
+    st.write(f"Processing enhanced MTM validation with core vs extra entry separation")
     
     # Display MTM rules
     st.subheader(f"{event_type} Rules")
@@ -469,7 +471,7 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
                 'interface_entries': 0,
                 'matched_entries': 0,
                 'expected_accounts': 0,
-                'extra_entries': 0,  # NEW COLUMN
+                'extra_entries': 0,
                 'issue': f'Deal {deal_number} not found in Cartera file - cannot determine estrategia'
             })
             continue
@@ -507,7 +509,7 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
                 'interface_entries': 0,
                 'matched_entries': 0,
                 'expected_accounts': 0,
-                'extra_entries': 0,  # NEW COLUMN
+                'extra_entries': 0,
                 'issue': f'No rule found for {instrument_type} with direction {direction} and {filter_criteria}'
             })
             continue
@@ -518,7 +520,7 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
         
         # Extract expected accounts from rules
         expected_accounts = []
-        expected_amounts = {}  # Build expected amounts dictionary for strict validation
+        expected_amounts = {}  # Build expected amounts dictionary for validation
         
         for _, rule in applicable_rules.iterrows():
             # Add debit account if present and not already added
@@ -564,36 +566,25 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
                 'interface_entries': 0,
                 'matched_entries': 0,
                 'expected_accounts': len(expected_accounts),
-                'extra_entries': 0,  # NEW COLUMN
+                'extra_entries': 0,
                 'issue': f'No entries found in interface file for deal {deal_number}'
             })
             continue
         
-        # NEW: Use strict validation logic
+        # Enhanced validation logic with separated core vs extra checking
         status, issue, extra_entry_count = _validate_entries_against_expected(
             deal_entries, expected_accounts, expected_amounts, 
             account_col, debit_col, credit_col, debug_deal, "MTM"
         )
         
-        # Count value-matched entries for backward compatibility
-        value_matched_entries = 0
-        if status == 'Full Match':
-            value_matched_entries = len(expected_accounts)
-        elif status == 'Partial Match' or 'Amount Mismatch' in status:
-            # Count how many accounts have correct amounts
-            for account in expected_accounts:
-                account_entries = deal_entries[deal_entries[account_col].astype(str) == account]
-                if len(account_entries) > 0:
-                    expected_amount = expected_amounts[account]['amount']
-                    expected_field = expected_amounts[account]['field']
-                    
-                    if expected_field == 'debit':
-                        actual_amount = account_entries[debit_col].sum()
-                    else:
-                        actual_amount = account_entries[credit_col].sum()
-                    
-                    if abs(actual_amount - expected_amount) < 1.0:
-                        value_matched_entries += 1
+        # Count correctly matched entries for the matched_entries column
+        correctly_matched_entries = 0
+        if status in ['Full Match', 'Correct + Extra Entries']:
+            correctly_matched_entries = len(expected_accounts)
+        elif 'Amount Mismatch' not in status:
+            # For other statuses, count how many accounts are actually present
+            found_accounts = deal_entries[account_col].astype(str).unique().tolist()
+            correctly_matched_entries = len([acc for acc in expected_accounts if acc in found_accounts])
         
         # Add to validation results
         validation_results.append({
@@ -604,9 +595,9 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
             'estrategia': estrategia,
             'status': status,
             'interface_entries': len(deal_entries),
-            'matched_entries': value_matched_entries,
+            'matched_entries': correctly_matched_entries,
             'expected_accounts': len(expected_accounts),
-            'extra_entries': extra_entry_count,  # NEW COLUMN
+            'extra_entries': extra_entry_count,
             'issue': issue
         })
     
@@ -632,11 +623,13 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
         
         # Display validation results
         st.subheader(f"{event_type} Validation Results")
-        st.write(f"Enhanced validation using Estrategia/Coverage filtering:")
+        st.write(f"Enhanced validation with separated core vs extra entry checking:")
+        st.write(f"• **Full Match**: Required entries correct, no extras")
+        st.write(f"• **Correct + Extra Entries**: Required entries correct, but unnecessary extras exist")
+        st.write(f"• **Amount Mismatch**: Required entries have wrong amounts")
+        st.write(f"• **Missing Accounts/Entries**: Required entries missing")
         st.write(f"• If Estrategia='NO' → Filter rules by coverage='No'")
         st.write(f"• If Estrategia≠'NO' → Filter rules by Estrategia=estrategia_value")
-        st.write(f"• Validates that ONLY expected entries exist (detects extra/duplicate entries)")
-        st.write(f"Matches made on combination of trade number, debe/haber, account number and MTM value. A match is considered valid when the MTM value difference is less than 1.0 (absolute value).")
         st.dataframe(validation_df, use_container_width=True, hide_index=True)
         
         # Show estrategia distribution
@@ -644,50 +637,64 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
             estrategia_counts = validation_df['estrategia'].value_counts()
             st.write("**Estrategia Distribution:**", estrategia_counts.to_dict())
         
-        # Calculate and display match statistics with new categories
-        full_match_count = len(validation_df[validation_df['status'] == 'Full Match'])
-        extra_entries_count = len(validation_df[validation_df['status'] == 'Extra Entries'])  # NEW
-        partial_match_count = len(validation_df[validation_df['status'] == 'Partial Match'])
-        no_match_count = len(validation_df[validation_df['status'] == 'No Match'])
+        # Calculate and display match statistics with enhanced categories
+        full_match_count = len(validation_df[validation_df['status'] == '✅ Perfect Match'])
+        correct_plus_extra_count = len(validation_df[validation_df['status'] == '✅ Correct (+ Extras)'])
+        amount_mismatch_count = len(validation_df[validation_df['status'] == '❌ Wrong Amounts'])
+        missing_entries_count = len(validation_df[validation_df['status'] == '❌ No Entries'])
+        missing_accounts_count = len(validation_df[validation_df['status'] == '❌ Missing Required'])
         anomaly_count = len(validation_df[validation_df['status'] == 'Cartera Anomaly'])
+        missing_rule_count = len(validation_df[validation_df['status'] == 'Missing Rule'])
         total_count = len(validation_df)
         
-        match_percentage = (full_match_count / total_count * 100) if total_count > 0 else 0
+        # Calculate success rates
+        core_success_rate = ((full_match_count + correct_plus_extra_count) / total_count * 100) if total_count > 0 else 0
+        perfect_match_rate = (full_match_count / total_count * 100) if total_count > 0 else 0
         
         col1, col2, col3, col4, col5, col6 = st.columns(6)
         with col1:
             st.metric("Total Deals", total_count)
         with col2:
-            st.metric("Full Matches", full_match_count)
+            st.metric("Perfect Matches", full_match_count)
         with col3:
-            st.metric("Extra Entries", extra_entries_count)  # NEW METRIC
+            st.metric("Correct + Extra", correct_plus_extra_count)
         with col4:
-            st.metric("Partial Matches", partial_match_count)
+            st.metric("Amount Issues", amount_mismatch_count)
         with col5:
-            st.metric("Anomalies", anomaly_count)
+            st.metric("Missing Issues", missing_entries_count + missing_accounts_count)
         with col6:
-            st.metric("Match Rate", f"{match_percentage:.1f}%")
+            st.metric("Core Success Rate", f"{core_success_rate:.1f}%")
         
-        # Status breakdown with new status
+        # Enhanced status breakdown
         status_counts = validation_df['status'].value_counts().to_dict()
-        st.subheader(f"{event_type} Status Breakdown")
-        st.write(status_counts)
+        st.subheader(f"{event_type} Enhanced Status Breakdown")
+        st.write("**Primary Concerns (Core Business Logic):**")
+        st.write(f"• ✅ Perfect Match: {full_match_count}")
+        st.write(f"• ✅ Correct + Extra Entries: {correct_plus_extra_count}")
+        st.write(f"• ❌ Wrong Amounts: {amount_mismatch_count}")
+        st.write(f"• ❌ Missing Required: {missing_accounts_count}")
+        st.write(f"• ❌ No Entries: {missing_entries_count}")
         
-        # Show extra entries summary if any exist
-        if extra_entries_count > 0:
-            st.warning(f"⚠️ Found {extra_entries_count} deals with extra entries that don't match the rules!")
-            extra_entries_df = validation_df[validation_df['status'] == 'Extra Entries']
-            total_extra_entries = extra_entries_df['extra_entries'].sum()
-            st.write(f"Total extra entries across all deals: {total_extra_entries}")
+        st.write("**Secondary Issues:**")
+        st.write(f"• Cartera Anomaly: {anomaly_count}")
+        st.write(f"• Missing Rule: {missing_rule_count}")
         
+        # Show summary of extra entries if any exist
+        total_extra_entries = validation_df[validation_df['status'] == '✅ Correct (+ Extras)']['extra_entries'].sum()
+        if total_extra_entries > 0:
+            st.info(f"📊 **Data Quality Summary**: {total_extra_entries} total unnecessary entries found across {correct_plus_extra_count} deals")
+            st.write("These deals have correct accounting but also contain superfluous entries that should be cleaned up.")
+        elif correct_plus_extra_count > 0:
+            st.info(f"📊 **Data Quality Summary**: {correct_plus_extra_count} deals have correct core accounting with some extra entries to clean up.")
+            
         # Allow downloading results
         csv = validation_df.to_csv().encode('utf-8')
         st.download_button(
-            f"Download {event_type} Results",
+            f"Download Enhanced {event_type} Results",
             csv,
-            f"{event_type.lower().replace(' ', '_')}_validation_results.csv",
+            f"enhanced_{event_type.lower().replace(' ', '_')}_validation_results.csv",
             "text/csv",
-            key=f'download-csv-{event_type.lower().replace(" ", "_")}{key_suffix}'
+            key=f'download-csv-enhanced-{event_type.lower().replace(" ", "_")}{key_suffix}'
         )
     else:
         st.warning(f"No {event_type} validation results generated")
@@ -1213,31 +1220,38 @@ def _validate_termino_only(expiries_df, interface_df, interface_cols, rules_df, 
 
 def _validate_entries_against_expected(entries_df, expected_accounts, expected_amounts, 
                                      account_col, debit_col, credit_col, debug_deal, validation_type):
-    """Helper function for simple validation (VENCIMIENTO) - NOW WITH EXTRA ENTRY DETECTION"""
+    """
+    Enhanced validation that prioritizes core business logic over entry count.
+    
+    Returns: (status, issue, extra_entry_count)
+    
+    NEW APPROACH:
+    1. First check: Are ALL required entries present with correct amounts? (CORE VALIDATION)
+    2. Second check: Are there extra entries beyond what's required? (DATA QUALITY)
+    
+    Status categories:
+    - "✅ Perfect Match": Required entries correct + no extras
+    - "✅ Correct (+ Extras)": Required entries correct + unnecessary extras exist
+    - "❌ Missing Required": Some required entries are missing  
+    - "❌ Wrong Amounts": Required entries present but wrong amounts
+    - "❌ No Entries": No entries found at all
+    """
+    
+    # Step 1: Basic check - do we have any entries?
     if len(entries_df) == 0:
-        return 'Missing Entries', f'No {validation_type} entries found in interface', 0
+        return '❌ No Entries', f'No {validation_type} entries found in interface', 0
     
-    expected_entry_count = len(expected_accounts)
-    
-    # NEW: Calculate extra entries
-    extra_entry_count = max(0, len(entries_df) - expected_entry_count)
-    
-    if len(entries_df) != expected_entry_count:
-        return 'Entry Count Mismatch', f'Expected {expected_entry_count} entries, found {len(entries_df)}', extra_entry_count
-    
-    # Check accounts
+    # Step 2: CORE VALIDATION - Check if ALL required accounts are present
     found_accounts = entries_df[account_col].astype(str).unique().tolist()
     missing_accounts = [acc for acc in expected_accounts if acc not in found_accounts]
-    extra_accounts = [acc for acc in found_accounts if acc not in expected_accounts]
     
     if missing_accounts:
-        return 'Missing Accounts', f'Missing expected accounts: {", ".join(missing_accounts)}', extra_entry_count
-    if extra_accounts:
-        return 'Extra Accounts', f'Found unexpected accounts: {", ".join(extra_accounts)}', extra_entry_count
+        extra_entry_count = len(entries_df)  # All entries are "extra" if required ones are missing
+        return '❌ Missing Required', f'Missing required accounts: {", ".join(missing_accounts)}', extra_entry_count
     
-    # Check amounts
-    all_match = True
-    mismatches = []
+    # Step 3: CORE VALIDATION - Check amounts for ALL required accounts
+    core_validation_issues = []
+    all_required_correct = True
     
     for account in expected_accounts:
         account_entries = entries_df[entries_df[account_col].astype(str) == account]
@@ -1250,44 +1264,67 @@ def _validate_entries_against_expected(entries_df, expected_accounts, expected_a
             actual_amount = account_entries[credit_col].sum()
         
         is_matching = abs(actual_amount - expected_amount) < 1.0
+        
         if not is_matching:
-            all_match = False
-            mismatches.append(f"{account} ({expected_field}): Expected {expected_amount}, Found {actual_amount:.2f}")
+            all_required_correct = False
+            core_validation_issues.append(f"{account} ({expected_field}): Expected {expected_amount}, Found {actual_amount:.2f}")
         
         if debug_deal is not None:
-            if is_matching:
-                st.success(f"✓ {validation_type} Account {account} ({expected_field}): Expected {expected_amount}, Found {actual_amount:.2f}")
-            else:
-                st.warning(f"✗ {validation_type} Account {account} ({expected_field}): Expected {expected_amount}, Found {actual_amount:.2f}")
+            status_icon = "✅" if is_matching else "❌"
+            st.write(f"{status_icon} {validation_type} Account {account} ({expected_field}): Expected {expected_amount}, Found {actual_amount:.2f}")
     
-    if all_match:
-        return 'Full Match', '', extra_entry_count
-    else:
-        return 'Amount Mismatch', f"Amount mismatches: {'; '.join(mismatches)}", extra_entry_count
-
+    # Step 4: If core validation failed, report that as the primary issue
+    if not all_required_correct:
+        extra_entry_count = max(0, len(entries_df) - len(expected_accounts))
+        return '❌ Wrong Amounts', f"Required entries have wrong amounts: {'; '.join(core_validation_issues)}", extra_entry_count
+    
+    # Step 5: Core validation PASSED! Now check for data quality issues (extra entries)
+    expected_entry_count = len(expected_accounts)
+    actual_entry_count = len(entries_df)
+    extra_entry_count = max(0, actual_entry_count - expected_entry_count)
+    
+    if extra_entry_count > 0:
+        # Core is correct, but there are unnecessary extra entries
+        extra_accounts = [acc for acc in found_accounts if acc not in expected_accounts]
+        if extra_accounts:
+            extra_info = f" Extra accounts: {', '.join(extra_accounts)}"
+        else:
+            extra_info = f" Duplicate entries in required accounts"
+        
+        if debug_deal is not None:
+            st.info(f"✅ All required entries are CORRECT for {validation_type}")
+            st.warning(f"⚠️ But found {extra_entry_count} unnecessary extra entries.{extra_info}")
+        
+        return '✅ Correct (+ Extras)', f"Required entries correct. Data quality issue: {extra_entry_count} extra entries.{extra_info}", extra_entry_count
+    
+    # Step 6: Perfect match - required entries present, correct, and no extras
+    if debug_deal is not None:
+        st.success(f"🎯 PERFECT MATCH for {validation_type} - all required entries correct, no extras!")
+    
+    return '✅ Perfect Match', '', 0
 
 def _validate_entries_against_expected_with_pata(entries_df, expected_accounts, expected_amounts, 
                                                account_col, debit_col, credit_col, debug_deal, validation_type):
-    """Helper function for Pata-aware validation (TERMINO)"""
+    """
+    Enhanced helper function for Pata-aware validation (TERMINO) with separated core vs extra checking.
+    
+    Returns: (status, issue, extra_entry_count)
+    """
     if len(entries_df) == 0:
-        return 'Missing Entries', f'No {validation_type} entries found in interface'
+        return 'Missing Entries', f'No {validation_type} entries found in interface', 0
     
     expected_entry_count = len(expected_accounts)
-    if len(entries_df) != expected_entry_count:
-        return 'Entry Count Mismatch', f'Expected {expected_entry_count} entries, found {len(entries_df)}'
+    extra_entry_count = max(0, len(entries_df) - expected_entry_count)
     
-    # Check accounts
+    # STEP 1: Check if all required accounts are present (core validation)
     found_accounts = entries_df[account_col].astype(str).unique().tolist()
     missing_accounts = [acc for acc in expected_accounts if acc not in found_accounts]
-    extra_accounts = [acc for acc in found_accounts if acc not in expected_accounts]
     
     if missing_accounts:
-        return 'Missing Accounts', f'Missing expected accounts: {", ".join(missing_accounts)}'
-    if extra_accounts:
-        return 'Extra Accounts', f'Found unexpected accounts: {", ".join(extra_accounts)}'
+        return 'Missing Accounts', f'Missing expected accounts: {", ".join(missing_accounts)}', extra_entry_count
     
-    # Check amounts with Pata awareness
-    all_match = True
+    # STEP 2: Check amounts for required accounts with Pata awareness (core validation)
+    all_required_match = True
     mismatches = []
     
     for account in expected_accounts:
@@ -1303,7 +1340,7 @@ def _validate_entries_against_expected_with_pata(entries_df, expected_accounts, 
         
         is_matching = abs(actual_amount - expected_amount) < 1.0
         if not is_matching:
-            all_match = False
+            all_required_match = False
             mismatches.append(f"{account} ({expected_field}, {pata_type}): Expected {expected_amount}, Found {actual_amount:.2f}")
         
         if debug_deal is not None:
@@ -1312,10 +1349,24 @@ def _validate_entries_against_expected_with_pata(entries_df, expected_accounts, 
             else:
                 st.warning(f"✗ {validation_type} Account {account} ({expected_field}, {pata_type}): Expected {expected_amount}, Found {actual_amount:.2f}")
     
-    if all_match:
-        return 'Full Match', ''
-    else:
-        return 'Amount Mismatch', f"Amount mismatches: {'; '.join(mismatches)}"
+    # STEP 3: Determine status based on core validation + extra entries
+    if not all_required_match:
+        # Core validation failed - this is the most important issue
+        return 'Amount Mismatch', f"Required entry mismatches: {'; '.join(mismatches)}", extra_entry_count
+    
+    # Core validation passed - now check for extra entries
+    if extra_entry_count > 0:
+        # Required entries are correct, but there are unnecessary extra entries
+        extra_accounts = [acc for acc in found_accounts if acc not in expected_accounts]
+        if extra_accounts:
+            extra_info = f" (extra accounts: {', '.join(extra_accounts)})"
+        else:
+            extra_info = f" (duplicate entries in expected accounts)"
+        
+        return 'Correct + Extra Entries', f"All required entries correct, but {extra_entry_count} unnecessary entries found{extra_info}", extra_entry_count
+    
+    # Perfect match - required entries present and correct, no extras
+    return 'Full Match', '', extra_entry_count
 
 def _display_validation_results(validation_results, validation_type):
     """Helper function to display validation results"""
