@@ -337,11 +337,13 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
     3. Get Estrategia from Cartera file for each deal
     4. Match with accounting interface entries
     5. Report on full, partial or non-matches
+    NOW WITH STRICT VALIDATION: Detects extra entries beyond what rules specify.
     """
     if debug_deal is not None:
         st.write(f"DEBUG: Analyzing deal number {debug_deal}")
     
     st.write(f"Found {len(mtm_rules)} {event_type} rules")
+    st.write(f"Processing MTM validation with strict entry checking")
     
     # Display MTM rules
     st.subheader(f"{event_type} Rules")
@@ -444,7 +446,7 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
                 st.warning(f"Unknown product code: {product_code} for deal {deal_number}")
             continue
         
-        # NEW: Get estrategia from Cartera file
+        # Get estrategia from Cartera file
         estrategia = estrategia_lookup.get(normalized_deal)
         
         if estrategia is None:
@@ -467,6 +469,7 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
                 'interface_entries': 0,
                 'matched_entries': 0,
                 'expected_accounts': 0,
+                'extra_entries': 0,  # NEW COLUMN
                 'issue': f'Deal {deal_number} not found in Cartera file - cannot determine estrategia'
             })
             continue
@@ -475,7 +478,7 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
             st.write(f"DEBUG: Processing deal {deal_number}, instrument: {instrument_type}, direction: {direction}, MTM: {mtm_abs:.2f}")
             st.write(f"DEBUG: Estrategia from Cartera: {estrategia}")
         
-        # NEW: Apply Estrategia/Cobertura filtering logic
+        # Apply Estrategia/Cobertura filtering logic
         if estrategia == "NO":
             # Filter by coverage column where value is "No"
             applicable_rules = mtm_rules[
@@ -504,6 +507,7 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
                 'interface_entries': 0,
                 'matched_entries': 0,
                 'expected_accounts': 0,
+                'extra_entries': 0,  # NEW COLUMN
                 'issue': f'No rule found for {instrument_type} with direction {direction} and {filter_criteria}'
             })
             continue
@@ -512,34 +516,32 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
             st.write(f"DEBUG: Found {len(applicable_rules)} applicable rules using filter: {filter_criteria}")
             st.dataframe(applicable_rules, use_container_width=True, hide_index=True)
         
-        # STEP 2: Extract expected accounts from rules
+        # Extract expected accounts from rules
         expected_accounts = []
+        expected_amounts = {}  # Build expected amounts dictionary for strict validation
         
         for _, rule in applicable_rules.iterrows():
             # Add debit account if present and not already added
             if pd.notna(rule['debit_account']):
                 debit_account = str(rule['debit_account'])
-                if debit_account not in [acc['account'] for acc in expected_accounts]:
-                    expected_accounts.append({
-                        'account': debit_account,
-                        'type': 'debit',
-                        'matched': False
-                    })
+                if debit_account not in expected_accounts:
+                    expected_accounts.append(debit_account)
+                    expected_amounts[debit_account] = {'amount': mtm_abs, 'field': 'debit'}
             
             # Add credit account if present and not already added
             if pd.notna(rule['credit_account']):
                 credit_account = str(rule['credit_account'])
-                if credit_account not in [acc['account'] for acc in expected_accounts]:
-                    expected_accounts.append({
-                        'account': credit_account,
-                        'type': 'credit',
-                        'matched': False
-                    })
+                if credit_account not in expected_accounts:
+                    expected_accounts.append(credit_account)
+                    expected_amounts[credit_account] = {'amount': mtm_abs, 'field': 'credit'}
         
         if debug_deal is not None:
-            st.write(f"Expected accounts: {[acc['account'] for acc in expected_accounts]}")
+            st.write(f"Expected accounts: {expected_accounts}")
+            st.write("Expected amounts by account:")
+            for acc, info in expected_amounts.items():
+                st.write(f"  {acc}: {info['amount']} ({info['field']})")
         
-        # STEP 3: Find matching entries in the interface file
+        # Find matching entries in the interface file
         # Filter by trade number
         deal_number = int(float(str(deal_number)))
         deal_entries = mtm_entries[
@@ -562,73 +564,36 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
                 'interface_entries': 0,
                 'matched_entries': 0,
                 'expected_accounts': len(expected_accounts),
+                'extra_entries': 0,  # NEW COLUMN
                 'issue': f'No entries found in interface file for deal {deal_number}'
             })
             continue
         
-        # STEP 4: Match entries with expected accounts
-        matched_entries = 0
+        # NEW: Use strict validation logic
+        status, issue, extra_entry_count = _validate_entries_against_expected(
+            deal_entries, expected_accounts, expected_amounts, 
+            account_col, debit_col, credit_col, debug_deal, "MTM"
+        )
+        
+        # Count value-matched entries for backward compatibility
         value_matched_entries = 0
-        total_debit_sum = 0
-        total_credit_sum = 0
-        
-        for expected in expected_accounts:
-            account = expected['account']
-            entry_type = expected['type']
-
-            # Filter by account
-            account_entries = deal_entries[deal_entries[account_col].astype(str) == account]
-            
-            if len(account_entries) == 0:
-                if debug_deal is not None:
-                    st.warning(f"No entries found for account {account}")
-                continue
-            
-            # Check for value match
-            if entry_type == 'debit':
-                # Sum debit values for this account
-                entry_value = account_entries[debit_col].sum()
-                total_debit_sum += entry_value
-                if abs(entry_value - mtm_abs) < 1.0:
-                    expected['matched'] = True
-                    matched_entries += 1
-                    value_matched_entries += 1
-                    if debug_deal is not None:
-                        st.success(f"✓ Found matching debit entry: Account {account}, Value {entry_value:.2f}")
-                elif entry_value > 0:
-                    # Account matches but value doesn't
-                    matched_entries += 1
-                    if debug_deal is not None:
-                        st.warning(f"✗ Found debit entry with incorrect value: Account {account}, Expected {mtm_abs:.2f}, Found {entry_value:.2f}")
-            else:  # credit
-                # Sum credit values for this account
-                entry_value = account_entries[credit_col].sum()
-                total_credit_sum += entry_value
-                if abs(entry_value - mtm_abs) < 1.0:
-                    expected['matched'] = True
-                    matched_entries += 1
-                    value_matched_entries += 1
-                    if debug_deal is not None:
-                        st.success(f"✓ Found matching credit entry: Account {account}, Value {entry_value:.2f}")
-                elif entry_value > 0:
-                    # Account matches but value doesn't
-                    matched_entries += 1
-                    if debug_deal is not None:
-                        st.warning(f"✗ Found credit entry with incorrect value: Account {account}, Expected {mtm_abs:.2f}, Found {entry_value:.2f}")
-        
-        # Determine overall match status
-        if matched_entries == 0:
-            status = 'No Match'
-            issue = 'No matching accounts found'
-        elif value_matched_entries == len(expected_accounts):
-            status = 'Full Match'
-            issue = ''
-        elif matched_entries > 0:
-            status = 'Partial Match'
-            issue = f'Found {matched_entries} account matches, but only {value_matched_entries} with correct values. Expected MTM: {mtm_abs:.2f}, Found debit: {total_debit_sum:.2f}, Found credit: {total_credit_sum:.2f}'
-        else:
-            status = 'Unknown'
-            issue = 'Validation logic error'
+        if status == 'Full Match':
+            value_matched_entries = len(expected_accounts)
+        elif status == 'Partial Match' or 'Amount Mismatch' in status:
+            # Count how many accounts have correct amounts
+            for account in expected_accounts:
+                account_entries = deal_entries[deal_entries[account_col].astype(str) == account]
+                if len(account_entries) > 0:
+                    expected_amount = expected_amounts[account]['amount']
+                    expected_field = expected_amounts[account]['field']
+                    
+                    if expected_field == 'debit':
+                        actual_amount = account_entries[debit_col].sum()
+                    else:
+                        actual_amount = account_entries[credit_col].sum()
+                    
+                    if abs(actual_amount - expected_amount) < 1.0:
+                        value_matched_entries += 1
         
         # Add to validation results
         validation_results.append({
@@ -641,6 +606,7 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
             'interface_entries': len(deal_entries),
             'matched_entries': value_matched_entries,
             'expected_accounts': len(expected_accounts),
+            'extra_entries': extra_entry_count,  # NEW COLUMN
             'issue': issue
         })
     
@@ -668,8 +634,9 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
         st.subheader(f"{event_type} Validation Results")
         st.write(f"Enhanced validation using Estrategia/Coverage filtering:")
         st.write(f"• If Estrategia='NO' → Filter rules by coverage='No'")
-        st.write(f"• If Estrategia≠'NO' → Filter rules by Estrategia='{estrategia}'")
-        st.write(f"Matches made on combination of trade number, debe/haber, account number and MTM value. Partial matches are considered where the first three elements match but the MTM value does not. A match is considered valid when the MTM value difference is less than 1.0 (absolute value).")
+        st.write(f"• If Estrategia≠'NO' → Filter rules by Estrategia=estrategia_value")
+        st.write(f"• Validates that ONLY expected entries exist (detects extra/duplicate entries)")
+        st.write(f"Matches made on combination of trade number, debe/haber, account number and MTM value. A match is considered valid when the MTM value difference is less than 1.0 (absolute value).")
         st.dataframe(validation_df, use_container_width=True, hide_index=True)
         
         # Show estrategia distribution
@@ -677,8 +644,9 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
             estrategia_counts = validation_df['estrategia'].value_counts()
             st.write("**Estrategia Distribution:**", estrategia_counts.to_dict())
         
-        # Calculate and display match statistics
+        # Calculate and display match statistics with new categories
         full_match_count = len(validation_df[validation_df['status'] == 'Full Match'])
+        extra_entries_count = len(validation_df[validation_df['status'] == 'Extra Entries'])  # NEW
         partial_match_count = len(validation_df[validation_df['status'] == 'Partial Match'])
         no_match_count = len(validation_df[validation_df['status'] == 'No Match'])
         anomaly_count = len(validation_df[validation_df['status'] == 'Cartera Anomaly'])
@@ -686,22 +654,31 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
         
         match_percentage = (full_match_count / total_count * 100) if total_count > 0 else 0
         
-        col1, col2, col3, col4, col5 = st.columns(5)
+        col1, col2, col3, col4, col5, col6 = st.columns(6)
         with col1:
             st.metric("Total Deals", total_count)
         with col2:
             st.metric("Full Matches", full_match_count)
         with col3:
-            st.metric("Partial Matches", partial_match_count)
+            st.metric("Extra Entries", extra_entries_count)  # NEW METRIC
         with col4:
-            st.metric("Anomalies", anomaly_count)
+            st.metric("Partial Matches", partial_match_count)
         with col5:
+            st.metric("Anomalies", anomaly_count)
+        with col6:
             st.metric("Match Rate", f"{match_percentage:.1f}%")
         
-        # Status breakdown
+        # Status breakdown with new status
         status_counts = validation_df['status'].value_counts().to_dict()
         st.subheader(f"{event_type} Status Breakdown")
         st.write(status_counts)
+        
+        # Show extra entries summary if any exist
+        if extra_entries_count > 0:
+            st.warning(f"⚠️ Found {extra_entries_count} deals with extra entries that don't match the rules!")
+            extra_entries_df = validation_df[validation_df['status'] == 'Extra Entries']
+            total_extra_entries = extra_entries_df['extra_entries'].sum()
+            st.write(f"Total extra entries across all deals: {total_extra_entries}")
         
         # Allow downloading results
         csv = validation_df.to_csv().encode('utf-8')
