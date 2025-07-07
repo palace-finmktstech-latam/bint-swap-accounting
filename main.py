@@ -221,9 +221,17 @@ if interface_file and rules_file:
                             debug_deal=debug_deal
                         )
                     
+                    # Check if both MTM validations are selected (combined mode)
+                    both_mtm_selected = run_mtm_validation and run_reversal_validation
+                    
                     # Run MTM validation if selected
                     if run_mtm_validation:
-                        st.header("💰 MTM Valorization Validation")
+                        if both_mtm_selected:
+                            st.header("💰 MTM Valorization Validation (Combined Mode)")
+                            st.info("ℹ️ Combined mode: Accounting for both current MTM and reversal entries in same interface file")
+                        else:
+                            st.header("💰 MTM Valorization Validation")
+                            
                         mtm_results = validate_mtm_entries(
                             interface_df, 
                             interface_cols, 
@@ -232,12 +240,18 @@ if interface_file and rules_file:
                             rules_df, 
                             cartera_df,
                             event_type='Valorización MTM',
-                            debug_deal=debug_deal
+                            debug_deal=debug_deal,
+                            combined_mtm_mode=both_mtm_selected  # NEW PARAMETER
                         )
                     
                     # Run reversal validation if selected
                     if run_reversal_validation:
-                        st.header("🔄 MTM Reversal Validation")
+                        if both_mtm_selected:
+                            st.header("🔄 MTM Reversal Validation (Combined Mode)")
+                            st.info("ℹ️ Combined mode: Accounting for both current MTM and reversal entries in same interface file")
+                        else:
+                            st.header("🔄 MTM Reversal Validation")
+                            
                         reversal_results = validate_mtm_entries(
                             interface_df, 
                             interface_cols, 
@@ -248,7 +262,8 @@ if interface_file and rules_file:
                             event_type='Valorización MTM',      # For interface file filtering
                             rules_event_type='Reversa Valorización MTM',  # For rules file filtering
                             key_suffix='-reversal',
-                            debug_deal=debug_deal
+                            debug_deal=debug_deal,
+                            combined_mtm_mode=both_mtm_selected  # NEW PARAMETER
                         )
                     
                     # Run VENCIMIENTO validation if selected

@@ -322,7 +322,8 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
                           event_type='Valorización MTM', 
                           rules_event_type=None,
                           key_suffix='', 
-                          debug_deal=None):
+                          debug_deal=None,
+                          combined_mtm_mode=False):
     
     # Use rules_event_type if provided, otherwise default to event_type
     filter_event = rules_event_type if rules_event_type else event_type
@@ -517,6 +518,7 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
         if debug_deal is not None:
             st.write(f"DEBUG: Found {len(applicable_rules)} applicable rules using filter: {filter_criteria}")
             st.dataframe(applicable_rules, use_container_width=True, hide_index=True)
+            st.write(f"DEBUG: Combined MTM mode2: {combined_mtm_mode}")
         
         # Extract expected accounts from rules
         expected_accounts = []
@@ -571,15 +573,78 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
             })
             continue
         
-        # Enhanced validation logic with separated core vs extra checking
-        status, issue, extra_entry_count = _validate_entries_against_expected(
-            deal_entries, expected_accounts, expected_amounts, 
-            account_col, debit_col, credit_col, debug_deal, "MTM"
-        )
+        if combined_mtm_mode:
+            # In combined mode, expect entries for both current and reversal MTM
+            adjusted_expected_count = len(expected_accounts) * 2  # Expect double entries
+            
+            if debug_deal is not None:
+                st.write(f"DEBUG: Combined mode - expecting {adjusted_expected_count} total entries (2x {len(expected_accounts)})")
+                st.write(f"DEBUG: Found {len(deal_entries)} actual entries")
+            
+            # Check core validation manually without flagging extras
+            # Step 1: Check if all required accounts are present
+            found_accounts = deal_entries[account_col].astype(str).unique().tolist()
+            missing_accounts = [acc for acc in expected_accounts if acc not in found_accounts]
+            
+            if missing_accounts:
+                status = '❌ Missing Required'
+                issue = f'Missing required accounts: {", ".join(missing_accounts)}'
+                extra_entry_count = len(deal_entries)
+            else:
+                # Step 2: Check amounts for required accounts
+                all_required_correct = True
+                core_validation_issues = []
+                
+                for account in expected_accounts:
+                    account_entries = deal_entries[deal_entries[account_col].astype(str) == account]
+                    expected_amount = expected_amounts[account]['amount']
+                    expected_field = expected_amounts[account]['field']
+                    
+                    if expected_field == 'debit':
+                        actual_amount = account_entries[debit_col].sum()
+                    else:
+                        actual_amount = account_entries[credit_col].sum()
+                    
+                    is_matching = abs(actual_amount - expected_amount) < 1.0
+                    
+                    if not is_matching:
+                        all_required_correct = False
+                        core_validation_issues.append(f"{account} ({expected_field}): Expected {expected_amount}, Found {actual_amount:.2f}")
+                    
+                    if debug_deal is not None:
+                        status_icon = "✅" if is_matching else "❌"
+                        st.write(f"{status_icon} Combined MTM Account {account} ({expected_field}): Expected {expected_amount}, Found {actual_amount:.2f}")
+                
+                # Step 3: Determine status based on combined mode expectations
+                if not all_required_correct:
+                    status = '❌ Wrong Amounts'
+                    issue = f"Required entries have wrong amounts: {'; '.join(core_validation_issues)}"
+                    extra_entry_count = max(0, len(deal_entries) - adjusted_expected_count)
+                else:
+                    # Core validation passed - check entry count for combined mode
+                    extra_entry_count = max(0, len(deal_entries) - adjusted_expected_count)
+                    
+                    if extra_entry_count == 0:
+                        status = '✅ Perfect Match'
+                        issue = 'All required entries correct (combined MTM mode)'
+                        if debug_deal is not None:
+                            st.success(f"🎯 PERFECT COMBINED MATCH - found exactly {len(deal_entries)} entries as expected for MTM+Reversal")
+                    else:
+                        status = '✅ Correct (+ Extras)'
+                        issue = f'Required entries correct, but {extra_entry_count} extra entries beyond expected combined total'
+                        if debug_deal is not None:
+                            st.info(f"✅ All required entries CORRECT for combined MTM")
+                            st.warning(f"⚠️ But found {extra_entry_count} entries beyond the expected {adjusted_expected_count} for MTM+Reversal")
+        else:
+            # Normal mode - original logic
+            status, issue, extra_entry_count = _validate_entries_against_expected(
+                deal_entries, expected_accounts, expected_amounts, 
+                account_col, debit_col, credit_col, debug_deal, "MTM"
+            )
         
         # Count correctly matched entries for the matched_entries column
         correctly_matched_entries = 0
-        if status in ['Full Match', 'Correct + Extra Entries']:
+        if status in ['✅ Perfect Match', '✅ Correct (+ Extras)']:
             correctly_matched_entries = len(expected_accounts)
         elif 'Amount Mismatch' not in status:
             # For other statuses, count how many accounts are actually present
