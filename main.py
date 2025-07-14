@@ -13,7 +13,7 @@ from file_parsers import (
     enrich_expiries_with_complementary_data,
     parse_incumplimientos_file,
     parse_counterparties_file,
-    parse_cartera_file
+    extract_estrategia_from_cartera_treasury  # NEW: For VENCIMIENTO validation
 )
 from validators import (
     validate_day_trades, 
@@ -48,11 +48,9 @@ with st.sidebar:
     day_trades_file = st.file_uploader("Upload Day Trades File", type=["csv"], 
                                     help="Required for Day Trades validation")
     cartera_treasury_t0_file = st.file_uploader("Upload Cartera Treasury (T0)", type=["xlsx", "xls"],
-                               help="Required for MTM Valorization validation - consolidated MTM data for today")
+                               help="Required for MTM Valorization validation - provides both MTM values and estrategia data")
     cartera_treasury_t1_file = st.file_uploader("Upload Cartera Treasury (T-1)", type=["xlsx", "xls"], 
-                                 help="Required for MTM Reversal validation - consolidated MTM data for yesterday")
-    cartera_file = st.file_uploader("Upload Cartera Analytics File", type=["csv", "xlsx"],
-                                   help="Contains deal numbers and estrategia (hedge accounting) info for MTM validation")
+                                 help="Required for MTM Reversal validation - provides both MTM values and estrategia data")
     expiries_file = st.file_uploader("Upload Expiries File", type=["xls", "xlsx"], 
                                  help="Required for VENCIMIENTO validation")                             
     expiry_complementary_file = st.file_uploader("Upload Expiry Complementary Data", type=["xlsx", "xls"],
@@ -72,14 +70,14 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("File Requirements")
 st.sidebar.markdown("""
 **Day Trades Validation**: Interface + Rules + Day Trades files  
-**MTM Valorization**: Interface + Rules + Cartera Treasury (T0) + Cartera files  
-**MTM Reversal**: Interface + Rules + Cartera Treasury (T-1) + Cartera files  
-**VENCIMIENTO Validation**: Interface + Rules + Expiries + Cartera files  
+**MTM Valorization**: Interface + Rules + Cartera Treasury (T0) files  
+**MTM Reversal**: Interface + Rules + Cartera Treasury (T-1) files  
+**VENCIMIENTO Validation**: Interface + Rules + Expiries + Cartera Treasury (T0) files  
 **Enhanced VENCIMIENTO**: Also upload Expiry Complementary Data for complete data  
 **INCUMPLIMIENTO Validation**: Interface + Rules + Incumplimientos + Counterparties files
 
-*Note: Cartera file provides estrategia (hedge accounting) data for enhanced MTM validation*
-*Note: Cartera Treasury files provide consolidated MTM values per deal (new format)*
+*Note: Cartera Treasury files now provide both MTM values AND estrategia data - no separate Cartera Analytics file needed!*
+*Note: Enhanced support for new MX estrategia values (COB_MX_ACTIVOS/COB_MX_PASIVOS)*
 """)
 
 # Main area - only show if core files are uploaded
@@ -111,12 +109,6 @@ if interface_file and rules_file:
     if day_trades_file:
         with st.expander("Day Trades File", expanded=False):
             day_trades_df = parse_day_trades_file(day_trades_file)
-    
-    # Parse cartera file
-    cartera_df = None
-    if cartera_file:
-        with st.expander("Cartera Analytics File", expanded=False):
-            cartera_df = parse_cartera_file(cartera_file)
             
     # Parse complementary data first
     expiry_complementary_df = None
@@ -161,15 +153,14 @@ if interface_file and rules_file:
     # MOVED: Validation options - only show available validations AFTER all parsing is complete
     st.subheader("Available Validations")
     
-    # Check what validations are possible - Updated for new format
+    # Check what validations are possible - Updated for integrated Cartera Treasury approach
     can_validate_day_trades = day_trades_df is not None and not day_trades_df.empty
     can_validate_mtm = (cartera_treasury_t0_processed is not None and 
-                       not cartera_treasury_t0_processed.empty and 
-                       cartera_df is not None and not cartera_df.empty)
+                       not cartera_treasury_t0_processed.empty)  # No separate cartera_df needed
     can_validate_reversal = (cartera_treasury_t1_processed is not None and 
-                            not cartera_treasury_t1_processed.empty and 
-                            cartera_df is not None and not cartera_df.empty)
-    can_validate_vencimiento = expiries_file is not None and cartera_df is not None and not cartera_df.empty
+                            not cartera_treasury_t1_processed.empty)  # No separate cartera_df needed
+    can_validate_vencimiento = (expiries_file is not None and 
+                              cartera_treasury_t0_df is not None and not cartera_treasury_t0_df.empty)  # Uses T0 for estrategia data
     can_validate_incumplimiento = incumplimientos_df is not None and not incumplimientos_df.empty
     
     if not any([can_validate_day_trades, can_validate_mtm, can_validate_reversal, can_validate_vencimiento, can_validate_incumplimiento]):
@@ -190,7 +181,7 @@ if interface_file and rules_file:
                 run_mtm_validation = st.checkbox("✅ Run MTM Valorization Validation", value=True)
             else:
                 st.checkbox("❌ Run MTM Valorization Validation", value=False, disabled=True)
-                st.caption("Requires Cartera Treasury (T0) and Cartera files")
+                st.caption("Requires Cartera Treasury (T0) file")
                 run_mtm_validation = False
             
             if can_validate_incumplimiento:
@@ -205,14 +196,14 @@ if interface_file and rules_file:
                 run_reversal_validation = st.checkbox("✅ Run MTM Reversal Validation", value=True)
             else:
                 st.checkbox("❌ Run MTM Reversal Validation", value=False, disabled=True)
-                st.caption("Requires Cartera Treasury (T-1) and Cartera files")
+                st.caption("Requires Cartera Treasury (T-1) file")
                 run_reversal_validation = False
                 
             if can_validate_vencimiento:
                 run_vencimiento_validation = st.checkbox("✅ Run VENCIMIENTO Validation", value=True)
             else:
                 st.checkbox("❌ Run VENCIMIENTO Validation", value=False, disabled=True)
-                st.caption("Requires Expiries and Cartera files")
+                st.caption("Requires Expiries and Cartera Treasury (T0) files")
                 run_vencimiento_validation = False
         
         # Run validations button - only show if at least one validation is selected
@@ -235,7 +226,7 @@ if interface_file and rules_file:
                     # Check if both MTM validations are selected (combined mode)
                     both_mtm_selected = run_mtm_validation and run_reversal_validation
                     
-                    # Run MTM validation if selected - UPDATED to use new format
+                    # Run MTM validation if selected - UPDATED to use integrated approach
                     if run_mtm_validation:
                         if both_mtm_selected:
                             st.header("💰 MTM Valorization Validation (Combined Mode)")
@@ -248,14 +239,14 @@ if interface_file and rules_file:
                             interface_cols, 
                             cartera_treasury_t0_df,  # Raw data for instrument type detection
                             cartera_treasury_t0_processed,  # Processed data for validation
-                            rules_df, 
-                            cartera_df,
+                            rules_df,
+                            # REMOVED: cartera_df parameter - now extracted from Cartera Treasury
                             event_type='Valorización MTM',
                             debug_deal=debug_deal,
                             combined_mtm_mode=both_mtm_selected
                         )
                     
-                    # Run reversal validation if selected - UPDATED to use new format
+                    # Run reversal validation if selected - UPDATED to use integrated approach
                     if run_reversal_validation:
                         if both_mtm_selected:
                             st.header("🔄 MTM Reversal Validation (Combined Mode)")
@@ -268,8 +259,8 @@ if interface_file and rules_file:
                             interface_cols, 
                             cartera_treasury_t1_df,  # Raw data for instrument type detection
                             cartera_treasury_t1_processed,  # Processed data for validation
-                            rules_df, 
-                            cartera_df,
+                            rules_df,
+                            # REMOVED: cartera_df parameter - now extracted from Cartera Treasury
                             event_type='Valorización MTM',      # For interface file filtering
                             rules_event_type='Reversa Valorización MTM',  # For rules file filtering
                             key_suffix='-reversal',
@@ -277,19 +268,23 @@ if interface_file and rules_file:
                             combined_mtm_mode=both_mtm_selected
                         )
                     
-                    # Run VENCIMIENTO validation if selected
+                    # Run VENCIMIENTO validation if selected - UPDATED to use integrated approach
                     if run_vencimiento_validation:
                         st.header("📅 VENCIMIENTO Validation")
+                        
+                        # Extract estrategia data from Cartera Treasury T0 for VENCIMIENTO validation
+                        vencimiento_cartera_df = extract_estrategia_from_cartera_treasury(cartera_treasury_t0_df)
+                        
                         vencimiento_results = validate_vencimiento_entries(
                             expiries_df,
                             interface_df,
                             interface_cols,
                             rules_df,
-                            cartera_df,
+                            vencimiento_cartera_df,  # Now uses estrategia data extracted from Cartera Treasury
                             debug_deal=debug_deal
                         )
                     
-                    # Run INCUMPLIMIENTO validation if selected
+                    # Run INCUMPLIMIENTO validation if selected (unchanged)
                     if run_incumplimiento_validation:
                         st.header("⚠️ INCUMPLIMIENTO Validation")
                         incumplimiento_results = validate_incumplimiento_entries(
@@ -316,11 +311,15 @@ else:
     
     ### Optional Files (choose based on validation needs):
     - **Day Trades File**: For validating new trades entered today
-    - **Cartera Treasury (T0)**: For validating current day's MTM valorization (new consolidated format)
-    - **Cartera Treasury (T-1)**: For validating reversal of previous day's MTM (new consolidated format)
-    - **Cartera Analytics File**: Provides estrategia (hedge accounting) data for MTM validation
+    - **Cartera Treasury (T0)**: For validating current day's MTM valorization (provides both MTM values and estrategia data)
+    - **Cartera Treasury (T-1)**: For validating reversal of previous day's MTM (provides both MTM values and estrategia data)
     - **Expiries File**: For validating VENCIMIENTO entries
     - **Expiry Complementary Data**: Provides amortization and hedge accounting data for enhanced VENCIMIENTO validation
     - **Incumplimientos File**: For validating INCUMPLIMIENTO entries
     - **Counterparties File**: Contains RUTs of Instituciones Financieras for INCUMPLIMIENTO validation
+    
+    ### 🎉 NEW: Simplified File Requirements!
+    - **No separate Cartera Analytics file needed** - estrategia data is now extracted directly from Cartera Treasury files
+    - **Enhanced estrategia support** - includes new MX values (COB_MX_ACTIVOS/COB_MX_PASIVOS)
+    - **Single source of truth** - Cartera Treasury provides both MTM values and estrategia data
     """)

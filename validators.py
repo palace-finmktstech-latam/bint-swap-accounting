@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from file_parsers import detect_instrument_type_from_cartera_treasury
+from file_parsers import detect_instrument_type_from_cartera_treasury, extract_estrategia_from_cartera_treasury
 
 def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, debug_deal=None):
     """
@@ -1882,16 +1882,14 @@ def validate_incumplimiento_entries(incumplimientos_df, interface_df, interface_
     return validation_df
 
 def validate_mtm_entries_new_format(interface_df, interface_cols, cartera_treasury_raw_df, cartera_treasury_processed_df, 
-                                   rules_df, cartera_df=None,
+                                   rules_df, cartera_treasury_raw_df_for_estrategia=None,
                                    event_type='Valorización MTM', 
                                    rules_event_type=None,
                                    key_suffix='', 
                                    debug_deal=None,
                                    combined_mtm_mode=False):
     """
-    Enhanced MTM validation using the new Cartera Treasury format.
-    
-    This replaces validate_mtm_entries for the new consolidated MTM data format.
+    Enhanced MTM validation using the new Cartera Treasury format for both MTM values and estrategia data.
     
     Args:
         interface_df: Accounting interface dataframe
@@ -1899,7 +1897,7 @@ def validate_mtm_entries_new_format(interface_df, interface_cols, cartera_treasu
         cartera_treasury_raw_df: Raw Cartera Treasury dataframe (for instrument type detection)
         cartera_treasury_processed_df: Processed dataframe with deal_number, total_mtm, direction
         rules_df: Accounting rules dataframe
-        cartera_df: Cartera analytics dataframe (for estrategia data)
+        cartera_treasury_raw_df_for_estrategia: Raw Cartera Treasury dataframe for estrategia extraction (defaults to cartera_treasury_raw_df)
         event_type: Event type for interface filtering
         rules_event_type: Event type for rules filtering (defaults to event_type)
         key_suffix: Suffix for unique keys
@@ -1921,7 +1919,7 @@ def validate_mtm_entries_new_format(interface_df, interface_cols, cartera_treasu
     
     st.write(f"Found {len(mtm_rules)} {event_type} rules")
     st.write(f"Processing enhanced MTM validation with new Cartera Treasury format")
-    st.write(f"Using consolidated MTM values (no leg-level summation needed)")
+    st.write(f"Using consolidated MTM values and estrategia data from Cartera Treasury file")
     
     # Display MTM rules
     st.subheader(f"{event_type} Rules")
@@ -1931,15 +1929,18 @@ def validate_mtm_entries_new_format(interface_df, interface_cols, cartera_treasu
         st.error(f"No {event_type} rules found in rules file")
         return pd.DataFrame()
     
-    # Check if Cartera file is provided (required for estrategia)
+    # Extract estrategia data from Cartera Treasury file (replaces separate Cartera Analytics file)
+    estrategia_source_df = cartera_treasury_raw_df_for_estrategia if cartera_treasury_raw_df_for_estrategia is not None else cartera_treasury_raw_df
+    cartera_df = extract_estrategia_from_cartera_treasury(estrategia_source_df)
+    
     if cartera_df is None or cartera_df.empty:
-        st.error("❌ Cartera file is required for MTM validation but was not provided")
-        st.error("Please upload the Cartera Analytics file to proceed with MTM validation")
+        st.error("❌ Could not extract estrategia data from Cartera Treasury file")
+        st.error("Estrategia data is required for MTM validation")
         return pd.DataFrame()
     
-    # Create estrategia lookup from Cartera file
+    # Create estrategia lookup from extracted Cartera Treasury data
     estrategia_lookup = dict(zip(cartera_df['deal_number'], cartera_df['estrategia']))
-    st.write(f"✅ Using Cartera file with estrategia data for {len(estrategia_lookup)} deals")
+    st.write(f"✅ Using estrategia data extracted from Cartera Treasury file for {len(estrategia_lookup)} deals")
     
     # Check if rules have required columns
     required_rule_columns = ['coverage', 'Estrategia']
@@ -2002,8 +2003,6 @@ def validate_mtm_entries_new_format(interface_df, interface_cols, cartera_treasu
             if debug_deal is not None:
                 st.warning(f"Could not determine instrument type for deal {deal_number} from Cartera Treasury file")
             
-            # For now, skip deals where we can't determine instrument type
-            # This might need to be enhanced based on the actual file content
             validation_results.append({
                 'deal_number': str(deal_number),
                 'instrument_type': 'UNKNOWN',
@@ -2019,17 +2018,17 @@ def validate_mtm_entries_new_format(interface_df, interface_cols, cartera_treasu
             })
             continue
         
-        # Get estrategia from Cartera file
+        # Get estrategia from extracted Cartera Treasury data
         estrategia = estrategia_lookup.get(normalized_deal)
         
         if estrategia is None:
-            # Handle missing deal in Cartera file - mark as anomaly and skip
+            # Handle missing deal in extracted estrategia data - mark as anomaly and skip
             cartera_anomalies.append({
                 'deal_number': str(deal_number),
                 'instrument_type': instrument_type,
                 'direction': direction,
                 'mtm_value': mtm_abs,
-                'issue': f'Deal {deal_number} not found in Cartera Analytics file'
+                'issue': f'Deal {deal_number} not found in extracted estrategia data from Cartera Treasury file'
             })
             
             validation_results.append({
@@ -2043,15 +2042,15 @@ def validate_mtm_entries_new_format(interface_df, interface_cols, cartera_treasu
                 'matched_entries': 0,
                 'expected_accounts': 0,
                 'extra_entries': 0,
-                'issue': f'Deal {deal_number} not found in Cartera Analytics file - cannot determine estrategia'
+                'issue': f'Deal {deal_number} not found in extracted estrategia data - cannot determine estrategia'
             })
             continue
         
         if debug_deal is not None:
             st.write(f"DEBUG: Processing deal {deal_number}, instrument: {instrument_type}, direction: {direction}, MTM: {mtm_abs:.2f}")
-            st.write(f"DEBUG: Estrategia from Cartera Analytics: {estrategia}")
+            st.write(f"DEBUG: Estrategia from Cartera Treasury: {estrategia}")
         
-        # Apply Estrategia/Cobertura filtering logic (same as before)
+        # Apply Estrategia/Cobertura filtering logic (enhanced to handle new MX values)
         if estrategia == "NO":
             # Filter by coverage column where value is "No"
             applicable_rules = mtm_rules[
@@ -2061,7 +2060,8 @@ def validate_mtm_entries_new_format(interface_df, interface_cols, cartera_treasu
             ]
             filter_criteria = f"coverage='No'"
         else:
-            # Filter by Estrategia column where value matches the estrategia from Cartera
+            # Filter by Estrategia column where value matches the estrategia from Cartera Treasury
+            # This now includes the new MX values: COB_MX_ACTIVOS, COB_MX_PASIVOS
             applicable_rules = mtm_rules[
                 (mtm_rules['subproduct'] == instrument_type) & 
                 (mtm_rules['direction'].str.upper() == direction) &
@@ -2237,7 +2237,7 @@ def validate_mtm_entries_new_format(interface_df, interface_cols, cartera_treasu
     
     # Display Cartera anomalies if any
     if cartera_anomalies:
-        st.error(f"⚠️ Found {len(cartera_anomalies)} deals in Cartera Treasury file that are missing from Cartera Analytics file:")
+        st.error(f"⚠️ Found {len(cartera_anomalies)} deals in Cartera Treasury file with estrategia extraction issues:")
         anomaly_df = pd.DataFrame(cartera_anomalies)
         st.dataframe(anomaly_df, use_container_width=True, hide_index=True)
     
@@ -2256,9 +2256,10 @@ def validate_mtm_entries_new_format(interface_df, interface_cols, cartera_treasu
             validation_df[col] = validation_df[col].round(2)
         
         # Display validation results
-        st.subheader(f"{event_type} Validation Results (New Cartera Treasury Format)")
-        st.write(f"Enhanced validation using consolidated MTM values from Cartera Treasury file:")
-        st.write(f"• **No leg-level summation needed** - using consolidated MTM values directly")
+        st.subheader(f"{event_type} Validation Results (Cartera Treasury Integrated)")
+        st.write(f"Enhanced validation using Cartera Treasury file for both MTM values and estrategia data:")
+        st.write(f"• **No separate Cartera Analytics file needed** - everything from Cartera Treasury")
+        st.write(f"• **Enhanced estrategia support** - includes new MX values (COB_MX_ACTIVOS/COB_MX_PASIVOS)")
         st.write(f"• **✅ Perfect Match**: Required entries correct, no extras")
         st.write(f"• **✅ Correct (+ Extras)**: Required entries correct, but unnecessary extras exist")
         st.write(f"• **❌ Wrong Amounts**: Required entries have wrong amounts")
@@ -2267,10 +2268,15 @@ def validate_mtm_entries_new_format(interface_df, interface_cols, cartera_treasu
         st.write(f"• If Estrategia≠'NO' → Filter rules by Estrategia=estrategia_value")
         st.dataframe(validation_df, use_container_width=True, hide_index=True)
         
-        # Show estrategia distribution
+        # Show estrategia distribution including new MX values
         if 'estrategia' in validation_df.columns:
             estrategia_counts = validation_df['estrategia'].value_counts()
-            st.write("**Estrategia Distribution:**", estrategia_counts.to_dict())
+            st.write("**Estrategia Distribution (from Cartera Treasury):**", estrategia_counts.to_dict())
+            
+            # Highlight new MX values
+            mx_deals = validation_df[validation_df['estrategia'].str.contains('COB_MX', na=False)]
+            if len(mx_deals) > 0:
+                st.info(f"ℹ️ Found {len(mx_deals)} deals using new MX estrategia values")
         
         # Calculate and display match statistics with enhanced categories
         full_match_count = len(validation_df[validation_df['status'] == '✅ Perfect Match'])
@@ -2302,7 +2308,7 @@ def validate_mtm_entries_new_format(interface_df, interface_cols, cartera_treasu
             st.metric("Core Success Rate", f"{core_success_rate:.1f}%")
         
         # Enhanced status breakdown
-        st.subheader(f"{event_type} Enhanced Status Breakdown (New Format)")
+        st.subheader(f"{event_type} Enhanced Status Breakdown (Cartera Treasury Integrated)")
         st.write("**Primary Concerns (Core Business Logic):**")
         st.write(f"• ✅ Perfect Match: {full_match_count}")
         st.write(f"• ✅ Correct + Extra Entries: {correct_plus_extra_count}")
@@ -2326,11 +2332,11 @@ def validate_mtm_entries_new_format(interface_df, interface_cols, cartera_treasu
         # Allow downloading results
         csv = validation_df.to_csv().encode('utf-8')
         st.download_button(
-            f"Download Enhanced {event_type} Results (New Format)",
+            f"Download Enhanced {event_type} Results (Cartera Treasury Integrated)",
             csv,
-            f"enhanced_{event_type.lower().replace(' ', '_')}_validation_results_new_format.csv",
+            f"enhanced_{event_type.lower().replace(' ', '_')}_validation_results_cartera_treasury.csv",
             "text/csv",
-            key=f'download-csv-enhanced-new-format-{event_type.lower().replace(" ", "_")}{key_suffix}'
+            key=f'download-csv-enhanced-cartera-treasury-{event_type.lower().replace(" ", "_")}{key_suffix}'
         )
     else:
         st.warning(f"No {event_type} validation results generated")

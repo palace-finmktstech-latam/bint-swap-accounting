@@ -1120,136 +1120,15 @@ def parse_counterparties_file(file):
         return pd.DataFrame()
     
 def parse_cartera_file(file):
-    """Parse the Cartera Analytics CSV file to extract deal_number and estrategia (hedge_accounting) data."""
-    try:
-        # Get file name for logging
-        file_name = getattr(file, 'name', 'unknown')
-        st.write(f"Attempting to parse Cartera file: {file_name}")
-        
-        # Try CSV parsing with different delimiters and encodings
-        df = None
-        parsing_method = None
-        
-        # First, try to detect delimiter by reading a sample
-        file.seek(0)
-        sample = file.read(4096)
-        file.seek(0)
-        
-        # Try to decode the sample
-        try:
-            sample_str = sample.decode('utf-8')
-        except UnicodeDecodeError:
-            try:
-                sample_str = sample.decode('latin1')
-            except UnicodeDecodeError:
-                sample_str = sample.decode('utf-8', errors='ignore')
-        
-        # Detect delimiter
-        if ';' in sample_str:
-            delimiter = ';'
-        elif ',' in sample_str:
-            delimiter = ','
-        elif '\t' in sample_str:
-            delimiter = '\t'
-        else:
-            delimiter = ','  # Default fallback
-        
-        st.write(f"Detected delimiter: '{delimiter}'")
-        
-        # Try different encodings
-        encodings_to_try = ['utf-8', 'latin1', 'cp1252']
-        
-        for encoding in encodings_to_try:
-            try:
-                file.seek(0)
-                df = pd.read_csv(file, delimiter=delimiter, encoding=encoding)
-                parsing_method = f"CSV (delimiter='{delimiter}', encoding='{encoding}')"
-                st.success(f"✅ Successfully parsed Cartera file with {encoding} encoding")
-                break
-            except Exception as e:
-                st.warning(f"Failed with {encoding} encoding: {str(e)}")
-                continue
-        
-        # If CSV parsing failed
-        if df is None:
-            st.error("❌ Could not parse the Cartera file with any method")
-            st.error("Please ensure the file is a valid CSV file")
-            return pd.DataFrame()
-        
-        st.write(f"✅ File successfully parsed using: {parsing_method}")
-        st.write("Cartera file columns:", df.columns.tolist())
-        
-        # Check for required columns
-        required_columns = ['deal_number', 'hedge_accounting']
-        
-        missing_columns = [col for col in required_columns if col not in df.columns]
-        
-        if missing_columns:
-            st.error(f"Missing required columns in Cartera file: {', '.join(missing_columns)}")
-            
-            # Show available columns for debugging
-            st.write("Available columns:", df.columns.tolist())
-            
-            # Try to find similar column names
-            for missing_col in missing_columns:
-                possible_matches = [col for col in df.columns if missing_col.lower() in col.lower()]
-                if possible_matches:
-                    st.write(f"Possible matches for '{missing_col}': {possible_matches}")
-            
-            return pd.DataFrame()
-        
-        # Convert deal_number to numeric
-        df['deal_number'] = pd.to_numeric(df['deal_number'], errors='coerce')
-        
-        # Rename hedge_accounting to estrategia for consistency with business terminology
-        df = df.rename(columns={'hedge_accounting': 'estrategia'})
-        
-        # Ensure string formatting for estrategia
-        df['estrategia'] = df['estrategia'].astype(str).str.strip()
-        
-        # Remove rows with invalid deal numbers
-        initial_count = len(df)
-        df = df.dropna(subset=['deal_number']).copy()
-        df['deal_number'] = df['deal_number'].astype(int)
-        final_count = len(df)
-        
-        if initial_count != final_count:
-            st.write(f"Removed {initial_count - final_count} rows with invalid deal numbers")
-        
-        # Display summary information
-        st.write(f"Found {len(df)} deals in Cartera file")
-        
-        # Show estrategia distribution
-        estrategia_counts = df['estrategia'].value_counts()
-        st.write("Estrategia distribution:", estrategia_counts.to_dict())
-        
-        # Show some additional useful info
-        if 'product' in df.columns:
-            product_counts = df['product'].value_counts()
-            st.write("Product distribution:", product_counts.to_dict())
-        
-        # Display preview of the parsed data (showing key columns)
-        st.subheader("Cartera Preview")
-        preview_columns = ['deal_number', 'estrategia']
-        if 'product' in df.columns:
-            preview_columns.append('product')
-        if 'counterparty_name' in df.columns:
-            preview_columns.append('counterparty_name')
-        
-        st.dataframe(df[preview_columns].head(10), use_container_width=True)
-        
-        # Create a lookup dictionary for efficient access during validation
-        estrategia_lookup = dict(zip(df['deal_number'], df['estrategia']))
-        st.write(f"Created estrategia lookup for {len(estrategia_lookup)} deals")
-        
-        return df
-        
-    except Exception as e:
-        st.error(f"Error parsing Cartera file: {str(e)}")
-        import traceback
-        st.error(traceback.format_exc())
-        return pd.DataFrame()
-
+    """
+    DEPRECATED: This function is now deprecated in favor of extracting estrategia data 
+    directly from the Cartera Treasury file using extract_estrategia_from_cartera_treasury().
+    
+    This function is kept for backward compatibility but will show a warning.
+    """
+    st.warning("⚠️ parse_cartera_file is deprecated. Estrategia data is now extracted directly from Cartera Treasury file.")
+    st.warning("Please use the Cartera Treasury file for both MTM values and estrategia data.")
+    
 def detect_instrument_type_from_cartera_treasury(df, deal_number):
     """
     Detect instrument type from Cartera Treasury file.
@@ -1298,3 +1177,91 @@ def detect_instrument_type_from_cartera_treasury(df, deal_number):
     }
     
     return product_mapping.get(producto, None)
+
+def extract_estrategia_from_cartera_treasury(cartera_treasury_raw_df):
+    """
+    Extract estrategia (hedge accounting) data from Cartera Treasury file.
+    
+    This replaces the need for a separate Cartera Analytics file by extracting
+    the same estrategia information from the Cartera Treasury file.
+    
+    Args:
+        cartera_treasury_raw_df: Raw Cartera Treasury dataframe
+        
+    Returns:
+        pd.DataFrame: DataFrame with deal_number and estrategia columns (same format as parse_cartera_file)
+    """
+    import streamlit as st
+    
+    if cartera_treasury_raw_df is None or cartera_treasury_raw_df.empty:
+        st.error("❌ Cartera Treasury file is empty - cannot extract estrategia data")
+        return pd.DataFrame()
+    
+    # Find the deal number column (handles newlines in column names)
+    deal_col = None
+    for col in cartera_treasury_raw_df.columns:
+        if 'Número' in str(col) and 'Operación' in str(col):
+            deal_col = col
+            break
+    
+    if not deal_col:
+        st.error("❌ Could not find deal number column in Cartera Treasury file")
+        return pd.DataFrame()
+    
+    # Find the estrategia column (handles newlines in column names)
+    estrategia_col = None
+    for col in cartera_treasury_raw_df.columns:
+        if 'Cobertura' in str(col) and 'Contable' in str(col):
+            estrategia_col = col
+            break
+    
+    if not estrategia_col:
+        st.error("❌ Could not find Cobertura Contable column in Cartera Treasury file")
+        return pd.DataFrame()
+    
+    st.write(f"✅ Extracting estrategia data from columns: '{deal_col}' and '{estrategia_col}'")
+    
+    # Create the estrategia dataframe in the same format as parse_cartera_file
+    estrategia_df = pd.DataFrame({
+        'deal_number': cartera_treasury_raw_df[deal_col],
+        'estrategia': cartera_treasury_raw_df[estrategia_col]
+    })
+    
+    # Clean the data
+    # Convert deal_number to numeric
+    estrategia_df['deal_number'] = pd.to_numeric(estrategia_df['deal_number'], errors='coerce')
+    
+    # Remove rows with invalid deal numbers
+    initial_count = len(estrategia_df)
+    estrategia_df = estrategia_df.dropna(subset=['deal_number']).copy()
+    estrategia_df['deal_number'] = estrategia_df['deal_number'].astype(int)
+    final_count = len(estrategia_df)
+    
+    if initial_count != final_count:
+        st.write(f"Removed {initial_count - final_count} rows with invalid deal numbers")
+    
+    # Ensure string formatting for estrategia
+    estrategia_df['estrategia'] = estrategia_df['estrategia'].astype(str).str.strip()
+    
+    # Display summary information
+    st.write(f"Found {len(estrategia_df)} deals with estrategia data")
+    
+    # Show estrategia distribution including new MX values
+    estrategia_counts = estrategia_df['estrategia'].value_counts()
+    st.write("Estrategia distribution:", estrategia_counts.to_dict())
+    
+    # Highlight new MX values if they exist
+    mx_values = estrategia_df[estrategia_df['estrategia'].str.contains('COB_MX', na=False)]
+    if len(mx_values) > 0:
+        st.info(f"ℹ️ Found {len(mx_values)} deals with new MX estrategia values (COB_MX_ACTIVOS/COB_MX_PASIVOS)")
+    
+    # Display preview of the extracted data
+    st.subheader("Estrategia Data Preview (from Cartera Treasury)")
+    preview_columns = ['deal_number', 'estrategia']
+    st.dataframe(estrategia_df[preview_columns].head(10), use_container_width=True)
+    
+    # Create a lookup dictionary for efficient access during validation (same as parse_cartera_file)
+    estrategia_lookup = dict(zip(estrategia_df['deal_number'], estrategia_df['estrategia']))
+    st.write(f"Created estrategia lookup for {len(estrategia_lookup)} deals from Cartera Treasury file")
+    
+    return estrategia_df
