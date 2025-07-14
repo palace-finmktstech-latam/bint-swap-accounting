@@ -1366,7 +1366,8 @@ def _validate_entries_against_expected(entries_df, expected_accounts, expected_a
     if debug_deal is not None:
         st.success(f"🎯 PERFECT MATCH for {validation_type} - all required entries correct, no extras!")
     
-    return '✅ Perfect Match', '', 0
+    #return '✅ Perfect Match', '', 0
+    return 'Full Match', '', 0
 
 def _validate_entries_against_expected_with_pata(entries_df, expected_accounts, expected_amounts, 
                                                account_col, debit_col, credit_col, debug_deal, validation_type):
