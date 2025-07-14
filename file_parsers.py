@@ -282,164 +282,134 @@ def parse_incumplimientos_file(file):
         st.error(traceback.format_exc())
         return pd.DataFrame()
 
-# Keep all existing functions unchanged
 def parse_mtm_file(file):
-    """Parse the MTM Excel file and sum MTM values by deal."""
+    """
+    DEPRECATED: Use parse_cartera_treasury_file instead.
     
-    # Get file extension to determine parsing approach
+    This function is kept for backward compatibility but will show a warning.
+    """
+    st.warning("⚠️ parse_mtm_file is deprecated. Please use parse_cartera_treasury_file instead.")
+    st.warning("The new function expects the consolidated Cartera Treasury format.")
+    
+    # Try to parse as old format for now, but recommend migration
+    return parse_cartera_treasury_file(file, "Legacy")
+
+def parse_cartera_treasury_file(file, file_type="T0"):
+    """
+    Parse the new Cartera Treasury Excel file format.
+    
+    This replaces the old parse_mtm_file function for the new consolidated format.
+    
+    Args:
+        file: Uploaded file object
+        file_type: "T0" for current day, "T-1" for previous day (for logging purposes)
+    
+    Returns:
+        tuple: (raw_df, processed_df) where processed_df has the format expected by validation
+    """
+    # Get file name for logging
     file_name = getattr(file, 'name', 'unknown')
-    file_extension = file_name.lower().split('.')[-1] if '.' in file_name else 'unknown'
+    st.write(f"Attempting to parse Cartera Treasury file ({file_type}): {file_name}")
     
-    st.write(f"Attempting to parse MTM file: {file_name}")
-    
+    # Try to read with different engines
     df = None
-    parsing_method = None
+    parsing_engine = None
     
-    # Try different parsing methods based on file extension and fallbacks
-    if file_extension in ['xlsx', 'xls']:
-        # Try Excel parsing with different engines
-        engines_to_try = ['openpyxl', 'xlrd'] if file_extension == 'xlsx' else ['xlrd', 'openpyxl']
-        
-        for engine in engines_to_try:
-            try:
-                st.write(f"Trying to read as Excel with {engine} engine...")
-                df = pd.read_excel(file, engine=engine)
-                parsing_method = f"Excel ({engine})"
-                st.success(f"✅ Successfully parsed as Excel using {engine} engine")
-                break
-            except Exception as e:
-                st.warning(f"Failed with {engine} engine: {str(e)}")
-                file.seek(0)  # Reset file pointer for next attempt
-                continue
+    engines_to_try = ['openpyxl', 'xlrd']
     
-    # If Excel parsing failed or file extension suggests CSV, try CSV parsing
-    if df is None:
+    for engine in engines_to_try:
         try:
-            st.write("Trying to read as CSV...")
-            file.seek(0)  # Reset file pointer
+            st.write(f"Trying to read Cartera Treasury file with {engine} engine...")
             
-            # First, try to detect delimiter by reading a sample
-            sample = file.read(4096)
-            file.seek(0)
+            # Data starts on row 11 (index 10) with headers
+            df = pd.read_excel(file, header=10, engine=engine)
             
-            # Try to decode the sample
-            try:
-                sample_str = sample.decode('utf-8')
-            except UnicodeDecodeError:
-                try:
-                    sample_str = sample.decode('latin1')
-                except UnicodeDecodeError:
-                    sample_str = sample.decode('utf-8', errors='ignore')
+            parsing_engine = engine
+            st.success(f"✅ Successfully parsed Cartera Treasury file using {engine} engine")
+            break
             
-            # Detect delimiter
-            if ';' in sample_str:
-                delimiter = ';'
-            elif ',' in sample_str:
-                delimiter = ','
-            elif '\t' in sample_str:
-                delimiter = '\t'
-            else:
-                delimiter = ','  # Default fallback
-            
-            st.write(f"Detected delimiter: '{delimiter}'")
-            
-            # Try different encodings
-            encodings_to_try = ['utf-8', 'latin1', 'cp1252']
-            
-            for encoding in encodings_to_try:
-                try:
-                    file.seek(0)
-                    df = pd.read_csv(file, delimiter=delimiter, encoding=encoding)
-                    parsing_method = f"CSV (delimiter='{delimiter}', encoding='{encoding}')"
-                    st.success(f"✅ Successfully parsed as CSV with {encoding} encoding")
-                    break
-                except Exception as e:
-                    st.warning(f"Failed with {encoding} encoding: {str(e)}")
-                    continue
-                    
         except Exception as e:
-            st.error(f"CSV parsing also failed: {str(e)}")
+            st.warning(f"Failed with {engine} engine: {str(e)}")
+            file.seek(0)  # Reset file pointer for next attempt
+            continue
     
-    # If all parsing methods failed
+    # If all engines failed
     if df is None:
-        st.error("❌ Could not parse the MTM file with any method")
-        st.error("Please ensure the file is a valid Excel (.xlsx/.xls) or CSV file")
+        st.error("❌ Could not parse the Cartera Treasury file with any Excel engine")
+        st.error("Please ensure the file is a valid Excel (.xlsx/.xls) file")
         return pd.DataFrame(), pd.DataFrame()
     
-    st.write(f"✅ File successfully parsed using: {parsing_method}")
-    st.write("MTM file columns:", df.columns.tolist())
+    # Show original columns
+    st.write("Cartera Treasury file columns:", df.columns.tolist())
     
-    # Map product codes to instrument types
-    product_mapping = {
-        'SWAP_TASA': 'Swap Tasa',
-        'SWAP_MONE': 'Swap Moneda',
-        'SWAP_ICP': 'Swap Cámara'
-    }
+    # Find the key columns
+    deal_col = None
+    mtm_col = None
     
-    # Find product column
-    product_col = next((col for col in df.columns if 'product' in str(col).lower()), None)
-    if not product_col:
-        st.error("Could not find product column in MTM file")
-        return pd.DataFrame(), pd.DataFrame()
+    for col in df.columns:
+        col_str = str(col).lower()
+        if 'número' in col_str and 'operación' in col_str:
+            deal_col = col
+        elif 'valor m2m' in col_str and 'clp' in col_str:
+            mtm_col = col
     
-    # Filter out unknown product codes and report them
-    valid_products = set(product_mapping.keys())
-    unknown_products = set(df[product_col].unique()) - valid_products
-    
-    if unknown_products:
-        st.warning(f"Found {len(unknown_products)} unknown product codes: {', '.join(map(str, unknown_products))}")
-        st.write("These products will be excluded from the analysis")
-    
-    # Filter dataframe to only include known products
-    df = df[df[product_col].isin(valid_products)].copy()
-    
-    if len(df) == 0:
-        st.error("No valid products found in MTM file")
-        return pd.DataFrame(), pd.DataFrame()
-    
-    # Add instrument type column
-    df['instrument_type'] = df[product_col].map(product_mapping)
-    
-    # Find MTM value column
-    mtm_col = next((col for col in df.columns if 'm2m_clp' in str(col).lower()), None)
-    if not mtm_col:
-        st.error("Could not find MTM value column in the MTM file")
-        return df, pd.DataFrame()
-    
-    # Find deal number column
-    deal_col = next((col for col in df.columns if 'deal' in str(col).lower() and 'number' in str(col).lower()), None)
     if not deal_col:
-        st.error("Could not find deal number column in the MTM file")
-        return df, pd.DataFrame()
+        st.error("Could not find 'Número Operación' column in Cartera Treasury file")
+        return pd.DataFrame(), pd.DataFrame()
+    
+    if not mtm_col:
+        st.error("Could not find 'Valor M2M (CLP)' column in Cartera Treasury file")
+        return pd.DataFrame(), pd.DataFrame()
+    
+    st.write(f"✅ Found key columns: Deal='{deal_col}', MTM='{mtm_col}'")
+    
+    # Clean the data
+    # Remove rows where deal number is NaN
+    df = df.dropna(subset=[deal_col]).copy()
+    
+    # Convert deal numbers to numeric
+    df[deal_col] = pd.to_numeric(df[deal_col], errors='coerce')
+    df = df.dropna(subset=[deal_col]).copy()
     
     # Convert MTM values to numeric
     df[mtm_col] = pd.to_numeric(df[mtm_col], errors='coerce')
+    df = df.fillna({mtm_col: 0}).copy()
     
-    # Sum MTM values by deal number
-    mtm_sums = df.groupby(deal_col)[mtm_col].sum().reset_index()
-    mtm_sums.rename(columns={deal_col: 'deal_number', mtm_col: 'total_mtm'}, inplace=True)
-    
-    # Round total_mtm to 0 decimal places (integers)
-    mtm_sums['total_mtm'] = mtm_sums['total_mtm'].round(0)
+    # Create the processed dataframe in the format expected by validation
+    processed_df = pd.DataFrame({
+        'deal_number': df[deal_col].astype(int),
+        'total_mtm': df[mtm_col].round(0),  # Round to integers like before
+    })
     
     # Add direction column
-    mtm_sums['direction'] = mtm_sums['total_mtm'].apply(
-        lambda x: 'POSITIVO' if x > 0 else 'NEGATIVO')
+    processed_df['direction'] = processed_df['total_mtm'].apply(
+        lambda x: 'POSITIVO' if x > 0 else 'NEGATIVO'
+    )
     
     # Display summary
-    st.write(f"Found {len(mtm_sums)} unique deals")
+    st.write(f"Found {len(processed_df)} deals with MTM values")
     
-    # Convert to string/dict before displaying to avoid Arrow issues
-    direction_counts = mtm_sums['direction'].value_counts()
+    # Show direction distribution
+    direction_counts = processed_df['direction'].value_counts()
     st.write("MTM direction counts:", direction_counts.to_dict())
     
-    # Convert to strings for display
-    mtm_sums_display = mtm_sums.head().copy()
-    mtm_sums_display['deal_number'] = mtm_sums_display['deal_number'].astype(str)
-    st.write("Sample of MTM sums:")
-    st.dataframe(mtm_sums_display)
+    # Show sample of processed data
+    st.write("Sample of processed MTM data:")
+    sample_df = processed_df.head().copy()
+    sample_df['deal_number'] = sample_df['deal_number'].astype(str)
+    st.dataframe(sample_df)
     
-    return df, mtm_sums
+    # Show basic statistics
+    total_positive = len(processed_df[processed_df['total_mtm'] > 0])
+    total_negative = len(processed_df[processed_df['total_mtm'] < 0])
+    total_zero = len(processed_df[processed_df['total_mtm'] == 0])
+    
+    st.write(f"📊 MTM Statistics:")
+    st.write(f"• Positive MTM: {total_positive} deals")
+    st.write(f"• Negative MTM: {total_negative} deals")
+    st.write(f"• Zero MTM: {total_zero} deals")
+    
+    return df, processed_df
 
 def parse_day_trades_file(file):
     """Parse the day trades CSV file."""
@@ -1279,3 +1249,52 @@ def parse_cartera_file(file):
         import traceback
         st.error(traceback.format_exc())
         return pd.DataFrame()
+
+def detect_instrument_type_from_cartera_treasury(df, deal_number):
+    """
+    Detect instrument type from Cartera Treasury file.
+    
+    Args:
+        df: Raw Cartera Treasury dataframe
+        deal_number: Deal number to look up
+        
+    Returns:
+        str: Instrument type ('Swap Tasa', 'Swap Moneda', 'Swap Cámara') or None
+    """
+    # Find the actual deal number column name (handles newlines in column names)
+    deal_col = None
+    for col in df.columns:
+        if 'Número' in str(col) and 'Operación' in str(col):
+            deal_col = col
+            break
+    
+    if not deal_col:
+        return None
+    
+    # Find the actual product column name (handles newlines in column names)
+    product_col = None
+    for col in df.columns:
+        if 'Producto' in str(col):
+            product_col = col
+            break
+    
+    if not product_col:
+        return None
+    
+    # Find the row for this deal
+    deal_row = df[df[deal_col] == deal_number]
+    
+    if len(deal_row) == 0:
+        return None
+    
+    # Get the product value
+    producto = deal_row[product_col].iloc[0]
+    
+    # Map the product values to our standard instrument types
+    product_mapping = {
+        'Swap Tasa': 'Swap Tasa',
+        'Swap Moneda': 'Swap Moneda',
+        'Swap Promedio Cámara': 'Swap Cámara'
+    }
+    
+    return product_mapping.get(producto, None)

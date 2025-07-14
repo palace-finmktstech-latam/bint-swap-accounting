@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+from file_parsers import detect_instrument_type_from_cartera_treasury
 
 def validate_day_trades(day_trades_df, interface_df, interface_cols, rules_df, debug_deal=None):
     """
@@ -1877,5 +1878,461 @@ def validate_incumplimiento_entries(incumplimientos_df, interface_df, interface_
         )
     else:
         st.warning("No incumplimiento validation results generated")
+    
+    return validation_df
+
+def validate_mtm_entries_new_format(interface_df, interface_cols, cartera_treasury_raw_df, cartera_treasury_processed_df, 
+                                   rules_df, cartera_df=None,
+                                   event_type='Valorización MTM', 
+                                   rules_event_type=None,
+                                   key_suffix='', 
+                                   debug_deal=None,
+                                   combined_mtm_mode=False):
+    """
+    Enhanced MTM validation using the new Cartera Treasury format.
+    
+    This replaces validate_mtm_entries for the new consolidated MTM data format.
+    
+    Args:
+        interface_df: Accounting interface dataframe
+        interface_cols: Column mapping for interface file
+        cartera_treasury_raw_df: Raw Cartera Treasury dataframe (for instrument type detection)
+        cartera_treasury_processed_df: Processed dataframe with deal_number, total_mtm, direction
+        rules_df: Accounting rules dataframe
+        cartera_df: Cartera analytics dataframe (for estrategia data)
+        event_type: Event type for interface filtering
+        rules_event_type: Event type for rules filtering (defaults to event_type)
+        key_suffix: Suffix for unique keys
+        debug_deal: Specific deal to debug
+        combined_mtm_mode: Whether both MTM and reversal are expected in same interface
+    
+    Returns:
+        pd.DataFrame: Validation results
+    """
+    
+    # Use rules_event_type if provided, otherwise default to event_type
+    filter_event = rules_event_type if rules_event_type else event_type
+    
+    # Filter rules using the appropriate event type
+    mtm_rules = rules_df[rules_df['event'] == filter_event].copy()
+    
+    if debug_deal is not None:
+        st.write(f"DEBUG: Analyzing deal number {debug_deal}")
+    
+    st.write(f"Found {len(mtm_rules)} {event_type} rules")
+    st.write(f"Processing enhanced MTM validation with new Cartera Treasury format")
+    st.write(f"Using consolidated MTM values (no leg-level summation needed)")
+    
+    # Display MTM rules
+    st.subheader(f"{event_type} Rules")
+    st.dataframe(mtm_rules, use_container_width=True, hide_index=True)
+    
+    if len(mtm_rules) == 0:
+        st.error(f"No {event_type} rules found in rules file")
+        return pd.DataFrame()
+    
+    # Check if Cartera file is provided (required for estrategia)
+    if cartera_df is None or cartera_df.empty:
+        st.error("❌ Cartera file is required for MTM validation but was not provided")
+        st.error("Please upload the Cartera Analytics file to proceed with MTM validation")
+        return pd.DataFrame()
+    
+    # Create estrategia lookup from Cartera file
+    estrategia_lookup = dict(zip(cartera_df['deal_number'], cartera_df['estrategia']))
+    st.write(f"✅ Using Cartera file with estrategia data for {len(estrategia_lookup)} deals")
+    
+    # Check if rules have required columns
+    required_rule_columns = ['coverage', 'Estrategia']
+    missing_rule_columns = [col for col in required_rule_columns if col not in mtm_rules.columns]
+    
+    if missing_rule_columns:
+        st.error(f"❌ Missing required columns in rules file: {', '.join(missing_rule_columns)}")
+        st.error("Rules file must contain both 'coverage' and 'Estrategia' columns for MTM validation")
+        return pd.DataFrame()
+    
+    # Find trade number column in interface file
+    trade_number_col = next((col for col in interface_df.columns if any(x in str(col).lower() for x in ['operación', 'operacion', 'nro.'])), None)
+    
+    if not trade_number_col:
+        st.warning("Could not find trade number column in interface file")
+        return pd.DataFrame()
+    
+    # Extract account interface entries for specified event type
+    mtm_entries = interface_df[interface_df['event_type'] == event_type].copy()
+    debit_col = interface_cols['debit']
+    credit_col = interface_cols['credit']
+    account_col = interface_cols['account']
+    
+    # Ensure numeric values in interface
+    mtm_entries[debit_col] = pd.to_numeric(mtm_entries[debit_col], errors='coerce').fillna(0)
+    mtm_entries[credit_col] = pd.to_numeric(mtm_entries[credit_col], errors='coerce').fillna(0)
+    
+    st.write(f"Found {len(mtm_entries)} {event_type} entries in interface file")
+    st.write(f"Found {len(cartera_treasury_processed_df)} deals in Cartera Treasury file")
+    
+    # Initialize validation results
+    validation_results = []
+    
+    # Track anomalies
+    cartera_anomalies = []
+    
+    # Process each deal from Cartera Treasury file
+    for _, deal_row in cartera_treasury_processed_df.iterrows():
+        deal_number = deal_row['deal_number']
+        
+        # Normalize deal numbers to integers for comparison
+        normalized_deal = int(float(str(deal_number)))
+        normalized_debug = int(float(str(debug_deal))) if debug_deal is not None else None
+        
+        # Skip if not the debug deal (when in debug mode)
+        if debug_deal is not None and normalized_deal != normalized_debug:
+            continue
+        
+        mtm_value = deal_row['total_mtm']
+        mtm_abs = abs(mtm_value)
+        
+        # Direction is the same for both normal and reversal validation
+        direction = 'POSITIVO' if mtm_value > 0 else 'NEGATIVO'
+        
+        # Try to determine instrument type from Cartera Treasury file
+        instrument_type = detect_instrument_type_from_cartera_treasury(cartera_treasury_raw_df, deal_number)
+        
+        # If we can't determine from Cartera Treasury, we'll need to skip or use a fallback
+        if not instrument_type:
+            if debug_deal is not None:
+                st.warning(f"Could not determine instrument type for deal {deal_number} from Cartera Treasury file")
+            
+            # For now, skip deals where we can't determine instrument type
+            # This might need to be enhanced based on the actual file content
+            validation_results.append({
+                'deal_number': str(deal_number),
+                'instrument_type': 'UNKNOWN',
+                'direction': direction,
+                'mtm_value': mtm_abs,
+                'estrategia': 'UNKNOWN',
+                'status': 'Unknown Instrument',
+                'interface_entries': 0,
+                'matched_entries': 0,
+                'expected_accounts': 0,
+                'extra_entries': 0,
+                'issue': f'Could not determine instrument type for deal {deal_number} from Cartera Treasury file'
+            })
+            continue
+        
+        # Get estrategia from Cartera file
+        estrategia = estrategia_lookup.get(normalized_deal)
+        
+        if estrategia is None:
+            # Handle missing deal in Cartera file - mark as anomaly and skip
+            cartera_anomalies.append({
+                'deal_number': str(deal_number),
+                'instrument_type': instrument_type,
+                'direction': direction,
+                'mtm_value': mtm_abs,
+                'issue': f'Deal {deal_number} not found in Cartera Analytics file'
+            })
+            
+            validation_results.append({
+                'deal_number': str(deal_number),
+                'instrument_type': instrument_type,
+                'direction': direction,
+                'mtm_value': mtm_abs,
+                'estrategia': 'MISSING',
+                'status': 'Cartera Anomaly',
+                'interface_entries': 0,
+                'matched_entries': 0,
+                'expected_accounts': 0,
+                'extra_entries': 0,
+                'issue': f'Deal {deal_number} not found in Cartera Analytics file - cannot determine estrategia'
+            })
+            continue
+        
+        if debug_deal is not None:
+            st.write(f"DEBUG: Processing deal {deal_number}, instrument: {instrument_type}, direction: {direction}, MTM: {mtm_abs:.2f}")
+            st.write(f"DEBUG: Estrategia from Cartera Analytics: {estrategia}")
+        
+        # Apply Estrategia/Cobertura filtering logic (same as before)
+        if estrategia == "NO":
+            # Filter by coverage column where value is "No"
+            applicable_rules = mtm_rules[
+                (mtm_rules['subproduct'] == instrument_type) & 
+                (mtm_rules['direction'].str.upper() == direction) &
+                (mtm_rules['coverage'] == 'No')
+            ]
+            filter_criteria = f"coverage='No'"
+        else:
+            # Filter by Estrategia column where value matches the estrategia from Cartera
+            applicable_rules = mtm_rules[
+                (mtm_rules['subproduct'] == instrument_type) & 
+                (mtm_rules['direction'].str.upper() == direction) &
+                (mtm_rules['Estrategia'] == estrategia)
+            ]
+            filter_criteria = f"Estrategia='{estrategia}'"
+        
+        if len(applicable_rules) == 0:
+            validation_results.append({
+                'deal_number': str(deal_number),
+                'instrument_type': instrument_type,
+                'direction': direction,
+                'mtm_value': mtm_abs,
+                'estrategia': estrategia,
+                'status': 'Missing Rule',
+                'interface_entries': 0,
+                'matched_entries': 0,
+                'expected_accounts': 0,
+                'extra_entries': 0,
+                'issue': f'No rule found for {instrument_type} with direction {direction} and {filter_criteria}'
+            })
+            continue
+        
+        if debug_deal is not None:
+            st.write(f"DEBUG: Found {len(applicable_rules)} applicable rules using filter: {filter_criteria}")
+            st.dataframe(applicable_rules, use_container_width=True, hide_index=True)
+            st.write(f"DEBUG: Combined MTM mode: {combined_mtm_mode}")
+        
+        # Extract expected accounts from rules (same logic as before)
+        expected_accounts = []
+        expected_amounts = {}
+        
+        for _, rule in applicable_rules.iterrows():
+            # Add debit account if present and not already added
+            if pd.notna(rule['debit_account']):
+                debit_account = str(rule['debit_account'])
+                if debit_account not in expected_accounts:
+                    expected_accounts.append(debit_account)
+                    expected_amounts[debit_account] = {'amount': mtm_abs, 'field': 'debit'}
+            
+            # Add credit account if present and not already added
+            if pd.notna(rule['credit_account']):
+                credit_account = str(rule['credit_account'])
+                if credit_account not in expected_accounts:
+                    expected_accounts.append(credit_account)
+                    expected_amounts[credit_account] = {'amount': mtm_abs, 'field': 'credit'}
+        
+        if debug_deal is not None:
+            st.write(f"Expected accounts: {expected_accounts}")
+            st.write("Expected amounts by account:")
+            for acc, info in expected_amounts.items():
+                st.write(f"  {acc}: {info['amount']} ({info['field']})")
+        
+        # Find matching entries in the interface file
+        deal_entries = mtm_entries[
+            (mtm_entries[trade_number_col] == deal_number)
+        ]
+
+        if debug_deal is not None:
+            st.write(f"Found {len(deal_entries)} entries for deal {deal_number} in interface file")
+            if len(deal_entries) > 0:
+                st.dataframe(deal_entries, use_container_width=True, hide_index=True)
+        
+        if len(deal_entries) == 0:
+            validation_results.append({
+                'deal_number': str(deal_number),
+                'instrument_type': instrument_type,
+                'direction': direction,
+                'mtm_value': mtm_abs,
+                'estrategia': estrategia,
+                'status': 'Missing Entries',
+                'interface_entries': 0,
+                'matched_entries': 0,
+                'expected_accounts': len(expected_accounts),
+                'extra_entries': 0,
+                'issue': f'No entries found in interface file for deal {deal_number}'
+            })
+            continue
+        
+        # Use the same validation logic as before
+        if combined_mtm_mode:
+            # In combined mode, expect entries for both current and reversal MTM
+            adjusted_expected_count = len(expected_accounts) * 2  # Expect double entries
+            
+            if debug_deal is not None:
+                st.write(f"DEBUG: Combined mode - expecting {adjusted_expected_count} total entries (2x {len(expected_accounts)})")
+                st.write(f"DEBUG: Found {len(deal_entries)} actual entries")
+            
+            # Check core validation manually without flagging extras
+            # Step 1: Check if all required accounts are present
+            found_accounts = deal_entries[account_col].astype(str).unique().tolist()
+            missing_accounts = [acc for acc in expected_accounts if acc not in found_accounts]
+            
+            if missing_accounts:
+                status = '❌ Missing Required'
+                issue = f'Missing required accounts: {", ".join(missing_accounts)}'
+                extra_entry_count = len(deal_entries)
+            else:
+                # Step 2: Check amounts for required accounts
+                all_required_correct = True
+                core_validation_issues = []
+                
+                for account in expected_accounts:
+                    account_entries = deal_entries[deal_entries[account_col].astype(str) == account]
+                    expected_amount = expected_amounts[account]['amount']
+                    expected_field = expected_amounts[account]['field']
+                    
+                    if expected_field == 'debit':
+                        actual_amount = account_entries[debit_col].sum()
+                    else:
+                        actual_amount = account_entries[credit_col].sum()
+                    
+                    is_matching = abs(actual_amount - expected_amount) < 1.0
+                    
+                    if not is_matching:
+                        all_required_correct = False
+                        core_validation_issues.append(f"{account} ({expected_field}): Expected {expected_amount}, Found {actual_amount:.2f}")
+                    
+                    if debug_deal is not None:
+                        status_icon = "✅" if is_matching else "❌"
+                        st.write(f"{status_icon} Combined MTM Account {account} ({expected_field}): Expected {expected_amount}, Found {actual_amount:.2f}")
+                
+                # Step 3: Determine status based on combined mode expectations
+                if not all_required_correct:
+                    status = '❌ Wrong Amounts'
+                    issue = f"Required entries have wrong amounts: {'; '.join(core_validation_issues)}"
+                    extra_entry_count = max(0, len(deal_entries) - adjusted_expected_count)
+                else:
+                    # Core validation passed - check entry count for combined mode
+                    extra_entry_count = max(0, len(deal_entries) - adjusted_expected_count)
+                    
+                    if extra_entry_count == 0:
+                        status = '✅ Perfect Match'
+                        issue = 'All required entries correct (combined MTM mode)'
+                        if debug_deal is not None:
+                            st.success(f"🎯 PERFECT COMBINED MATCH - found exactly {len(deal_entries)} entries as expected for MTM+Reversal")
+                    else:
+                        status = '✅ Correct (+ Extras)'
+                        issue = f'Required entries correct, but {extra_entry_count} extra entries beyond expected combined total'
+                        if debug_deal is not None:
+                            st.info(f"✅ All required entries CORRECT for combined MTM")
+                            st.warning(f"⚠️ But found {extra_entry_count} entries beyond the expected {adjusted_expected_count} for MTM+Reversal")
+        else:
+            # Normal mode - use the existing validation helper function
+            status, issue, extra_entry_count = _validate_entries_against_expected(
+                deal_entries, expected_accounts, expected_amounts, 
+                account_col, debit_col, credit_col, debug_deal, "MTM"
+            )
+        
+        # Count correctly matched entries for the matched_entries column
+        correctly_matched_entries = 0
+        if status in ['✅ Perfect Match', '✅ Correct (+ Extras)']:
+            correctly_matched_entries = len(expected_accounts)
+        elif 'Amount Mismatch' not in status:
+            # For other statuses, count how many accounts are actually present
+            found_accounts = deal_entries[account_col].astype(str).unique().tolist()
+            correctly_matched_entries = len([acc for acc in expected_accounts if acc in found_accounts])
+        
+        # Add to validation results
+        validation_results.append({
+            'deal_number': str(deal_number),
+            'instrument_type': instrument_type,
+            'direction': direction,
+            'mtm_value': mtm_abs,
+            'estrategia': estrategia,
+            'status': status,
+            'interface_entries': len(deal_entries),
+            'matched_entries': correctly_matched_entries,
+            'expected_accounts': len(expected_accounts),
+            'extra_entries': extra_entry_count,
+            'issue': issue
+        })
+    
+    # Display Cartera anomalies if any
+    if cartera_anomalies:
+        st.error(f"⚠️ Found {len(cartera_anomalies)} deals in Cartera Treasury file that are missing from Cartera Analytics file:")
+        anomaly_df = pd.DataFrame(cartera_anomalies)
+        st.dataframe(anomaly_df, use_container_width=True, hide_index=True)
+    
+    # Create validation results dataframe
+    validation_df = pd.DataFrame(validation_results)
+    
+    if len(validation_df) > 0:
+        # Convert object columns to strings for Arrow compatibility
+        for col in validation_df.columns:
+            if validation_df[col].dtype == 'object':
+                validation_df[col] = validation_df[col].astype(str)
+            
+        # Format numeric columns
+        numeric_cols = validation_df.select_dtypes(include=['float64', 'int64']).columns
+        for col in numeric_cols:
+            validation_df[col] = validation_df[col].round(2)
+        
+        # Display validation results
+        st.subheader(f"{event_type} Validation Results (New Cartera Treasury Format)")
+        st.write(f"Enhanced validation using consolidated MTM values from Cartera Treasury file:")
+        st.write(f"• **No leg-level summation needed** - using consolidated MTM values directly")
+        st.write(f"• **✅ Perfect Match**: Required entries correct, no extras")
+        st.write(f"• **✅ Correct (+ Extras)**: Required entries correct, but unnecessary extras exist")
+        st.write(f"• **❌ Wrong Amounts**: Required entries have wrong amounts")
+        st.write(f"• **❌ Missing Required/Entries**: Required entries missing")
+        st.write(f"• If Estrategia='NO' → Filter rules by coverage='No'")
+        st.write(f"• If Estrategia≠'NO' → Filter rules by Estrategia=estrategia_value")
+        st.dataframe(validation_df, use_container_width=True, hide_index=True)
+        
+        # Show estrategia distribution
+        if 'estrategia' in validation_df.columns:
+            estrategia_counts = validation_df['estrategia'].value_counts()
+            st.write("**Estrategia Distribution:**", estrategia_counts.to_dict())
+        
+        # Calculate and display match statistics with enhanced categories
+        full_match_count = len(validation_df[validation_df['status'] == '✅ Perfect Match'])
+        correct_plus_extra_count = len(validation_df[validation_df['status'] == '✅ Correct (+ Extras)'])
+        amount_mismatch_count = len(validation_df[validation_df['status'] == '❌ Wrong Amounts'])
+        missing_entries_count = len(validation_df[validation_df['status'] == '❌ No Entries'])
+        missing_accounts_count = len(validation_df[validation_df['status'] == '❌ Missing Required'])
+        anomaly_count = len(validation_df[validation_df['status'] == 'Cartera Anomaly'])
+        missing_rule_count = len(validation_df[validation_df['status'] == 'Missing Rule'])
+        unknown_instrument_count = len(validation_df[validation_df['status'] == 'Unknown Instrument'])
+        total_count = len(validation_df)
+        
+        # Calculate success rates
+        core_success_rate = ((full_match_count + correct_plus_extra_count) / total_count * 100) if total_count > 0 else 0
+        perfect_match_rate = (full_match_count / total_count * 100) if total_count > 0 else 0
+        
+        col1, col2, col3, col4, col5, col6 = st.columns(6)
+        with col1:
+            st.metric("Total Deals", total_count)
+        with col2:
+            st.metric("Perfect Matches", full_match_count)
+        with col3:
+            st.metric("Correct + Extra", correct_plus_extra_count)
+        with col4:
+            st.metric("Amount Issues", amount_mismatch_count)
+        with col5:
+            st.metric("Missing Issues", missing_entries_count + missing_accounts_count)
+        with col6:
+            st.metric("Core Success Rate", f"{core_success_rate:.1f}%")
+        
+        # Enhanced status breakdown
+        st.subheader(f"{event_type} Enhanced Status Breakdown (New Format)")
+        st.write("**Primary Concerns (Core Business Logic):**")
+        st.write(f"• ✅ Perfect Match: {full_match_count}")
+        st.write(f"• ✅ Correct + Extra Entries: {correct_plus_extra_count}")
+        st.write(f"• ❌ Wrong Amounts: {amount_mismatch_count}")
+        st.write(f"• ❌ Missing Required: {missing_accounts_count}")
+        st.write(f"• ❌ No Entries: {missing_entries_count}")
+        
+        st.write("**Secondary Issues:**")
+        st.write(f"• Cartera Anomaly: {anomaly_count}")
+        st.write(f"• Missing Rule: {missing_rule_count}")
+        st.write(f"• Unknown Instrument: {unknown_instrument_count}")
+        
+        # Show summary of extra entries if any exist
+        total_extra_entries = validation_df[validation_df['status'] == '✅ Correct (+ Extras)']['extra_entries'].sum()
+        if total_extra_entries > 0:
+            st.info(f"📊 **Data Quality Summary**: {total_extra_entries} total unnecessary entries found across {correct_plus_extra_count} deals")
+            st.write("These deals have correct accounting but also contain superfluous entries that should be cleaned up.")
+        elif correct_plus_extra_count > 0:
+            st.info(f"📊 **Data Quality Summary**: {correct_plus_extra_count} deals have correct core accounting with some extra entries to clean up.")
+            
+        # Allow downloading results
+        csv = validation_df.to_csv().encode('utf-8')
+        st.download_button(
+            f"Download Enhanced {event_type} Results (New Format)",
+            csv,
+            f"enhanced_{event_type.lower().replace(' ', '_')}_validation_results_new_format.csv",
+            "text/csv",
+            key=f'download-csv-enhanced-new-format-{event_type.lower().replace(" ", "_")}{key_suffix}'
+        )
+    else:
+        st.warning(f"No {event_type} validation results generated")
     
     return validation_df
