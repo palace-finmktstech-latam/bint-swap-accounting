@@ -767,26 +767,45 @@ def validate_mtm_entries(interface_df, interface_cols, mtm_df, mtm_sums, rules_d
     
     return validation_df
 
-def validate_vencimiento_entries(expiries_df, interface_df, interface_cols, rules_df, cartera_df=None, debug_deal=None):
+def validate_vencimiento_entries(expiries_df, interface_df, interface_cols, rules_df, cartera_treasury_raw_df_or_cartera_df=None, debug_deal=None):
     """
     Validate both VENCIMIENTO and TERMINO entries against accounting interface entries.
     
-    VENCIMIENTO: Enhanced with Estrategia-based filtering from Cartera file
+    UPDATED: Now accepts either:
+    1. Raw Cartera Treasury dataframe (new integrated approach) - extracts estrategia data automatically
+    2. Pre-extracted Cartera Analytics dataframe (backward compatibility)
+    
+    VENCIMIENTO: Enhanced with Estrategia-based filtering from Cartera Treasury
     TERMINO: Uses existing logic (unchanged)
     
     Both validations run together since they're part of the same business process.
     """
     st.header("🔄 VENCIMIENTO & TERMINO Validation")
     
-    # Check if Cartera file is provided (now required for enhanced VENCIMIENTO validation)
-    if cartera_df is None or cartera_df.empty:
-        st.error("❌ Cartera file is required for enhanced VENCIMIENTO validation but was not provided")
-        st.error("Please upload the Cartera Analytics file to proceed with VENCIMIENTO validation")
+    # Check if we have any data source for estrategia
+    if cartera_treasury_raw_df_or_cartera_df is None or cartera_treasury_raw_df_or_cartera_df.empty:
+        st.error("❌ Cartera Treasury file is required for enhanced VENCIMIENTO validation but was not provided")
+        st.error("Please upload the Cartera Treasury file to proceed with VENCIMIENTO validation")
         return pd.DataFrame()
     
-    # Create estrategia lookup from Cartera file
+    # Determine if we have raw Cartera Treasury data or pre-extracted estrategia data
+    # Check if it has the expected Cartera Treasury columns or extracted format
+    if 'estrategia' in cartera_treasury_raw_df_or_cartera_df.columns and 'deal_number' in cartera_treasury_raw_df_or_cartera_df.columns:
+        # This is already extracted estrategia data (from main.py)
+        cartera_df = cartera_treasury_raw_df_or_cartera_df
+        st.write("✅ Using pre-extracted estrategia data")
+    else:
+        # This is raw Cartera Treasury data - extract estrategia
+        st.write("🔄 Extracting estrategia data from Cartera Treasury file for VENCIMIENTO validation")
+        cartera_df = extract_estrategia_from_cartera_treasury(cartera_treasury_raw_df_or_cartera_df)
+        
+        if cartera_df is None or cartera_df.empty:
+            st.error("❌ Could not extract estrategia data from Cartera Treasury file")
+            return pd.DataFrame()
+    
+    # Create estrategia lookup from Cartera data
     estrategia_lookup = dict(zip(cartera_df['deal_number'], cartera_df['estrategia']))
-    st.write(f"✅ Using Cartera file with estrategia data for {len(estrategia_lookup)} deals")
+    st.write(f"✅ Using estrategia data for {len(estrategia_lookup)} deals")
     
     # Run VENCIMIENTO validation first (enhanced with Estrategia)
     st.subheader("📅 VENCIMIENTO Validation")
@@ -859,6 +878,18 @@ def _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_
     for _, expiry in expiries_df.iterrows():
         trade_number = expiry['Número Operación']
         
+        # FIXED: Handle NaN trade numbers
+        if pd.isna(trade_number):
+            st.warning(f"⚠️ Skipping expiry with missing trade number")
+            continue
+        
+        # FIXED: Safely convert to integer
+        try:
+            trade_number = int(float(str(trade_number)))
+        except (ValueError, TypeError):
+            st.warning(f"⚠️ Skipping expiry with invalid trade number: {trade_number}")
+            continue
+        
         # Skip if not the debug deal (when in debug mode)
         if debug_deal is not None and str(trade_number) != str(debug_deal):
             continue
@@ -867,7 +898,7 @@ def _validate_vencimiento_only(expiries_df, interface_df, interface_cols, rules_
         settlement_currency = expiry.get('Moneda Liquidación', 'Unknown')
         
         # NEW: Get estrategia from Cartera file
-        normalized_deal = int(float(str(trade_number)))
+        normalized_deal = trade_number  # Already converted to int above
         estrategia = estrategia_lookup.get(normalized_deal)
         
         if estrategia is None:
@@ -1143,6 +1174,22 @@ def _validate_termino_only(expiries_df, interface_df, interface_cols, rules_df, 
     for _, expiry in expiries_df.iterrows():
         trade_number = expiry['Número Operación']
         
+        # FIXED: Handle NaN trade numbers (same as VENCIMIENTO)
+        if pd.isna(trade_number):
+            skipped_count += 1
+            if debug_deal is not None:
+                st.write(f"DEBUG TERMINO: Skipping expiry with missing trade number")
+            continue
+        
+        # FIXED: Safely convert to integer
+        try:
+            trade_number = int(float(str(trade_number)))
+        except (ValueError, TypeError):
+            skipped_count += 1
+            if debug_deal is not None:
+                st.write(f"DEBUG TERMINO: Skipping expiry with invalid trade number: {trade_number}")
+            continue
+        
         # Skip if not the debug deal (when in debug mode)
         if debug_deal is not None and str(trade_number) != str(debug_deal):
             continue
@@ -1260,8 +1307,8 @@ def _validate_termino_only(expiries_df, interface_df, interface_cols, rules_df, 
             if len(termino_entries) > 0:
                 st.dataframe(termino_entries, use_container_width=True, hide_index=True)
         
-        # Validation logic with Pata-aware amounts
-        status, issue = _validate_entries_against_expected_with_pata(
+        # FIXED: Validation logic with Pata-aware amounts - now expecting 3 return values
+        status, issue, extra_entry_count = _validate_entries_against_expected_with_pata(
             termino_entries, expected_accounts, expected_amounts, 
             account_col, debit_col, credit_col, debug_deal, "TERMINO"
         )
@@ -1276,6 +1323,7 @@ def _validate_termino_only(expiries_df, interface_df, interface_cols, rules_df, 
             'status': status,
             'interface_entries': len(termino_entries),
             'expected_entries': expected_entry_count,
+            'extra_entries': extra_entry_count,  # NEW: Now capturing extra entries count
             'issue': issue
         })
     

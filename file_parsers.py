@@ -169,41 +169,55 @@ def parse_incumplimientos_file(file):
         # Show columns found
         st.write("Incumplimientos file columns:", df.columns.tolist())
         
-        # Check for required columns based on the analysis
-        required_columns = [
-            'Fecha y Hora', 'Número de operación', 'Monto', 'Moneda', 
-            'rut', 'Cliente', 'Acción', 'Usuario que realizó la acción'
-        ]
+        # ENHANCED: Dynamic column detection to handle both old and new formats
+        # Find columns by pattern matching instead of exact names
+        column_mapping = {}
         
-        missing_columns = [col for col in required_columns if col not in df.columns]
+        # Required columns patterns
+        required_patterns = {
+            'fecha_hora': ['Fecha y Hora'],
+            'numero_operacion': ['Número de operación'],
+            'monto': ['Monto a cobrar', 'Monto'],  # NEW: Support both old and new
+            'moneda': ['Moneda de pago', 'Moneda'],  # NEW: Support both old and new
+            'rut_cliente': ['rut'],
+            'nombre_cliente': ['Cliente'],
+            'accion': ['Acción'],
+            'usuario': ['Usuario que realizó la acción']
+        }
         
-        if missing_columns:
-            st.error(f"Missing required columns in incumplimientos file: {', '.join(missing_columns)}")
+        # Find matching columns
+        for internal_name, possible_names in required_patterns.items():
+            found_column = None
+            for possible_name in possible_names:
+                # Look for exact match first
+                if possible_name in df.columns:
+                    found_column = possible_name
+                    break
+                # Look for partial match (in case of extra spaces, etc.)
+                for col in df.columns:
+                    if possible_name.lower().strip() in str(col).lower().strip():
+                        found_column = col
+                        break
+                if found_column:
+                    break
+            
+            if found_column:
+                column_mapping[found_column] = internal_name
+                st.write(f"✅ Found {internal_name}: '{found_column}'")
+            else:
+                st.error(f"❌ Could not find column for {internal_name}")
+                st.write(f"   Looked for: {possible_names}")
+        
+        # Check if we found all required columns
+        if len(column_mapping) != len(required_patterns):
+            missing_patterns = set(required_patterns.keys()) - set(column_mapping.values())
+            st.error(f"Missing required columns: {missing_patterns}")
             
             # Show available columns for debugging
             st.write("Available columns:", df.columns.tolist())
-            
-            # Try to find similar column names
-            for missing_col in missing_columns:
-                possible_matches = [col for col in df.columns if missing_col.lower() in col.lower()]
-                if possible_matches:
-                    st.write(f"Possible matches for '{missing_col}': {possible_matches}")
-            
             return pd.DataFrame()
         
-        # Clean and standardize column names for easier processing
-        column_mapping = {
-            'Fecha y Hora': 'fecha_hora',
-            'Número de operación': 'numero_operacion', 
-            'Monto': 'monto',
-            'Moneda': 'moneda',
-            'rut': 'rut_cliente',
-            'Cliente': 'nombre_cliente',
-            'Acción': 'accion',
-            'Usuario que realizó la acción': 'usuario'
-        }
-        
-        # Rename columns
+        # Rename columns using our mapping
         df = df.rename(columns=column_mapping)
         
         # Convert data types
@@ -275,6 +289,12 @@ def parse_incumplimientos_file(file):
         st.dataframe(df[display_columns].head(10), use_container_width=True)
         
         return df
+        
+    except Exception as e:
+        st.error(f"Error parsing incumplimientos file: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
+        return pd.DataFrame()
         
     except Exception as e:
         st.error(f"Error parsing incumplimientos file: {str(e)}")
@@ -1209,14 +1229,16 @@ def extract_estrategia_from_cartera_treasury(cartera_treasury_raw_df):
         return pd.DataFrame()
     
     # Find the estrategia column (handles newlines in column names)
+    # CORRECTED: Looking for the actual column name 'Estrategia\nde Cobertura'
     estrategia_col = None
     for col in cartera_treasury_raw_df.columns:
-        if 'Cobertura' in str(col) and 'Contable' in str(col):
+        if 'Estrategia' in str(col) and 'Cobertura' in str(col):
             estrategia_col = col
             break
     
     if not estrategia_col:
-        st.error("❌ Could not find Cobertura Contable column in Cartera Treasury file")
+        st.error("❌ Could not find Estrategia de Cobertura column in Cartera Treasury file")
+        st.error(f"Available columns: {cartera_treasury_raw_df.columns.tolist()}")
         return pd.DataFrame()
     
     st.write(f"✅ Extracting estrategia data from columns: '{deal_col}' and '{estrategia_col}'")
