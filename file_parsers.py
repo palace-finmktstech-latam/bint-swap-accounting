@@ -433,6 +433,8 @@ def parse_cartera_treasury_file(file, file_type="T0"):
 
 def parse_day_trades_file(file):
     """Parse the day trades CSV file."""
+    """DEPRECATED: Use extract_day_trades_from_cartera_t0 instead."""
+
     # First, try to inspect the file content to determine the format
     file.seek(0)  # Reset file pointer to beginning
     sample = file.read(4096).decode('latin1')  # Read a sample to inspect
@@ -527,6 +529,202 @@ def parse_day_trades_file(file):
     st.dataframe(df[preview_columns], use_container_width=True)
     
     return df
+
+def extract_day_trades_from_cartera_t0(cartera_t0_raw_df, selected_date):
+    """
+    Extract day trades data from Cartera T0 file by filtering on Fecha Cierre.
+    
+    This replaces the need for a separate day trades file upload.
+    
+    Args:
+        cartera_t0_raw_df: Raw Cartera T0 dataframe
+        selected_date: Date to filter on (pandas Timestamp or datetime)
+        
+    Returns:
+        pd.DataFrame: DataFrame with same format as parse_day_trades_file output
+    """
+    if cartera_t0_raw_df is None or cartera_t0_raw_df.empty:
+        st.error("❌ Cartera T0 file is empty - cannot extract day trades data")
+        return pd.DataFrame()
+    
+    st.write(f"🔄 Extracting day trades from Cartera T0 for date: {selected_date.strftime('%Y-%m-%d')}")
+    
+    # Find the required columns (handling newlines in column names)
+    column_mapping = {}
+    
+    required_patterns = {
+        'numero_operacion': ['Número\nOperación', 'Número Operación'],
+        'producto': ['Producto'],
+        'moneda_activa': ['Moneda\nActiva', 'Moneda Activa'],
+        'nocional_activa': ['Nocional\nActiva', 'Nocional Activa'],
+        'moneda_pasiva': ['Moneda\nPasiva', 'Moneda Pasiva'],
+        'nocional_pasiva': ['Nocional\nPasiva', 'Nocional Pasiva'],
+        'estrategia_cobertura': ['Estrategia\nde Cobertura', 'Estrategia de Cobertura'],
+        'fecha_cierre': ['Fecha Cierre']
+    }
+    
+    # Find matching columns
+    for internal_name, possible_names in required_patterns.items():
+        found_column = None
+        for possible_name in possible_names:
+            # Look for exact match first
+            if possible_name in cartera_t0_raw_df.columns:
+                found_column = possible_name
+                break
+            # Look for partial match (in case of extra spaces, etc.)
+            for col in cartera_t0_raw_df.columns:
+                if possible_name.lower().strip().replace('\n', ' ') in str(col).lower().strip().replace('\n', ' '):
+                    found_column = col
+                    break
+            if found_column:
+                break
+        
+        if found_column:
+            column_mapping[found_column] = internal_name
+            st.write(f"✅ Found {internal_name}: '{found_column}'")
+        else:
+            st.error(f"❌ Could not find column for {internal_name}")
+            st.write(f"   Looked for: {possible_names}")
+    
+    # Check if we found all required columns
+    if len(column_mapping) != len(required_patterns):
+        missing_patterns = set(required_patterns.keys()) - set(column_mapping.values())
+        st.error(f"Missing required columns: {missing_patterns}")
+        
+        # Show available columns for debugging
+        st.write("Available columns:", cartera_t0_raw_df.columns.tolist())
+        return pd.DataFrame()
+    
+    # Create reverse mapping for easier access
+    col_map = {v: k for k, v in column_mapping.items()}
+    
+    # Convert fecha_cierre to datetime if it's not already
+    fecha_col = col_map['fecha_cierre']
+    if not pd.api.types.is_datetime64_any_dtype(cartera_t0_raw_df[fecha_col]):
+        try:
+            # UPDATED: Handle DD-MM-YYYY format (like 31-05-2011)
+            st.write(f"Converting Fecha Cierre column to datetime. Sample values: {cartera_t0_raw_df[fecha_col].head().tolist()}")
+            
+            # First, convert to string to handle any mixed types
+            cartera_t0_raw_df[fecha_col] = cartera_t0_raw_df[fecha_col].astype(str)
+            
+            # Try different date formats commonly found in Chilean files
+            # Format 1: DD-MM-YYYY (like 31-05-2011)
+            cartera_t0_raw_df[fecha_col] = pd.to_datetime(cartera_t0_raw_df[fecha_col], format='%d-%m-%Y', errors='coerce')
+            
+            # If that failed, try other common formats
+            if cartera_t0_raw_df[fecha_col].isna().all():
+                st.write("DD-MM-YYYY format failed, trying dayfirst=True parsing...")
+                cartera_t0_raw_df[fecha_col] = cartera_t0_raw_df[fecha_col].astype(str)
+                cartera_t0_raw_df[fecha_col] = pd.to_datetime(cartera_t0_raw_df[fecha_col], dayfirst=True, errors='coerce')
+            
+            # If still failed, try Excel date format
+            if cartera_t0_raw_df[fecha_col].isna().all():
+                st.write("String parsing failed, trying Excel date format...")
+                # Reset to original values and try Excel date parsing
+                file.seek(0)
+                temp_df = pd.read_excel(file, header=10)
+                cartera_t0_raw_df[fecha_col] = pd.to_datetime(temp_df[fecha_col], origin='1899-12-30', unit='D', errors='coerce')
+            
+            st.write(f"Successfully converted Fecha Cierre. Sample converted values: {cartera_t0_raw_df[fecha_col].head().tolist()}")
+            
+        except Exception as e:
+            st.error(f"Could not convert Fecha Cierre to datetime format: {str(e)}")
+            st.write(f"Sample values in Fecha Cierre column: {cartera_t0_raw_df[fecha_col].head().tolist()}")
+            return pd.DataFrame()
+    
+    # Filter by selected date
+    selected_date_normalized = pd.to_datetime(selected_date).normalize()
+    mask = cartera_t0_raw_df[fecha_col].dt.normalize() == selected_date_normalized
+    
+    filtered_df = cartera_t0_raw_df[mask].copy()
+    
+    st.write(f"Found {len(filtered_df)} trades for date {selected_date.strftime('%Y-%m-%d')}")
+    
+    if len(filtered_df) == 0:
+        st.warning(f"No trades found for selected date {selected_date.strftime('%Y-%m-%d')}")
+        return pd.DataFrame()
+    
+    # Create the day trades format dataframe
+    day_trades_df = pd.DataFrame({
+        'Número Operación': filtered_df[col_map['numero_operacion']],
+        'Producto': filtered_df[col_map['producto']],  # Keep for consistency even if not used
+        'Subproducto': filtered_df[col_map['producto']],  # Map Producto to Subproducto
+        'Moneda Activa': filtered_df[col_map['moneda_activa']],
+        'Monto Activo': filtered_df[col_map['nocional_activa']],
+        'Moneda Pasiva': filtered_df[col_map['moneda_pasiva']],
+        'Monto Pasivo': filtered_df[col_map['nocional_pasiva']],
+        'Cobertura': filtered_df[col_map['estrategia_cobertura']]
+    })
+    
+    # Clean and convert data types
+    day_trades_df['Número Operación'] = pd.to_numeric(day_trades_df['Número Operación'], errors='coerce')
+    day_trades_df['Monto Activo'] = pd.to_numeric(day_trades_df['Monto Activo'], errors='coerce')
+    day_trades_df['Monto Pasivo'] = pd.to_numeric(day_trades_df['Monto Pasivo'], errors='coerce')
+    
+    # IMPORTANT: Convert Monto Pasivo to positive (Cartera T0 stores as negative, but day trades validation expects positive)
+    day_trades_df['Monto Pasivo'] = abs(day_trades_df['Monto Pasivo'])
+
+    # Remove rows with invalid deal numbers
+    initial_count = len(day_trades_df)
+    day_trades_df = day_trades_df.dropna(subset=['Número Operación']).copy()
+    final_count = len(day_trades_df)
+    
+    if initial_count != final_count:
+        st.write(f"Removed {initial_count - final_count} rows with invalid deal numbers")
+    
+    # Map Cobertura: "NO" -> "No", anything else -> "Sí"
+    day_trades_df['Cobertura'] = day_trades_df['Cobertura'].apply(
+        lambda x: 'No' if str(x).strip().upper() == 'NO' else 'Sí'
+    )
+    
+    # Map subproduct codes to instrument types (updated for Cartera T0 format)
+    subproduct_mapping = {
+        'Swap Moneda': 'Swap Moneda',
+        'Swap Tasa': 'Swap Tasa',
+        'Swap Promedio Cámara': 'Swap Cámara'
+    }
+    
+    # Create instrument_type column based on Subproducto
+    day_trades_df['instrument_type'] = day_trades_df['Subproducto'].map(subproduct_mapping)
+    
+    # Handle any unmapped products
+    unmapped_products = day_trades_df[~day_trades_df['Subproducto'].isin(subproduct_mapping.keys())]['Subproducto'].unique()
+    if len(unmapped_products) > 0:
+        st.warning(f"Found unmapped products: {unmapped_products}")
+        
+        # Make a best guess for unmapped products
+        for product in unmapped_products:
+            if isinstance(product, str):  # Make sure it's a string before checking
+                if 'moneda' in product.lower():
+                    day_trades_df.loc[day_trades_df['Subproducto'] == product, 'instrument_type'] = 'Swap Moneda'
+                elif 'tasa' in product.lower():
+                    day_trades_df.loc[day_trades_df['Subproducto'] == product, 'instrument_type'] = 'Swap Tasa'
+                elif 'cámara' in product.lower() or 'camara' in product.lower() or 'promedio' in product.lower():
+                    day_trades_df.loc[day_trades_df['Subproducto'] == product, 'instrument_type'] = 'Swap Cámara'
+    
+    # Display summary information
+    st.write(f"Extracted {len(day_trades_df)} day trades for {selected_date.strftime('%Y-%m-%d')}")
+    
+    # Show product distribution
+    product_counts = day_trades_df['Subproducto'].value_counts()
+    st.write("Product counts:", product_counts.to_dict())
+    
+    # Show instrument type mapping results
+    instrument_counts = day_trades_df['instrument_type'].value_counts(dropna=False)
+    st.write("Instrument type counts:", instrument_counts.to_dict())
+    
+    # Show cobertura distribution
+    cobertura_counts = day_trades_df['Cobertura'].value_counts()
+    st.write("Cobertura distribution:", cobertura_counts.to_dict())
+    
+    # Display preview of the extracted data
+    st.subheader("Day Trades Preview (Extracted from Cartera T0)")
+    preview_columns = ['Número Operación', 'Subproducto', 'instrument_type', 'Cobertura',
+                     'Moneda Activa', 'Monto Activo', 'Moneda Pasiva', 'Monto Pasivo']
+    st.dataframe(day_trades_df[preview_columns], use_container_width=True)
+    
+    return day_trades_df
 
 def parse_expiries_file(file):
     """Parse the expiries Excel file with correct column expectations."""

@@ -1,12 +1,13 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+from datetime import datetime, timedelta
 
 # Import our custom modules
 from file_parsers import (
     parse_interface_file, 
     parse_cartera_treasury_file,  # NEW: Replaces parse_mtm_file
-    parse_day_trades_file, 
+    extract_day_trades_from_cartera_t0,  # NEW: Extract day trades from Cartera T0
     parse_expiries_file, 
     parse_rules_file,
     parse_expiry_complementary_file,
@@ -36,6 +37,16 @@ st.set_page_config(
 st.title("Swap Accounting Interface Validator")
 
 with st.sidebar:
+    st.header("Configuration")
+    
+    # NEW: Date picker for day trades extraction
+    st.subheader("Day Trades Date")
+    selected_date = st.date_input(
+        "Select date for day trades extraction",
+        value=datetime.now().date(),
+        help="Day trades will be extracted from Cartera T0 file for this date using 'Fecha Cierre' field"
+    )
+    
     st.header("Upload Files")
     
     # Core required files
@@ -45,10 +56,9 @@ with st.sidebar:
     
     # Optional files for specific validations
     st.subheader("Optional Files")
-    day_trades_file = st.file_uploader("Upload Day Trades File", type=["csv"], 
-                                    help="Required for Day Trades validation")
+    # REMOVED: day_trades_file upload - now extracted from Cartera T0
     cartera_treasury_t0_file = st.file_uploader("Upload Cartera Treasury (T0)", type=["xlsx", "xls"],
-                               help="Required for MTM Valorization validation - provides both MTM values and estrategia data")
+                               help="Required for MTM Valorization and Day Trades validation - provides MTM values, estrategia data, and day trades data")
     cartera_treasury_t1_file = st.file_uploader("Upload Cartera Treasury (T-1)", type=["xlsx", "xls"], 
                                  help="Required for MTM Reversal validation - provides both MTM values and estrategia data")
     expiries_file = st.file_uploader("Upload Expiries File", type=["xls", "xlsx"], 
@@ -69,14 +79,15 @@ with st.sidebar:
 st.sidebar.markdown("---")
 st.sidebar.subheader("File Requirements")
 st.sidebar.markdown("""
-**Day Trades Validation**: Interface + Rules + Day Trades files  
+**Day Trades Validation**: Interface + Rules + Cartera Treasury (T0) files + Date selection  
 **MTM Valorization**: Interface + Rules + Cartera Treasury (T0) files  
 **MTM Reversal**: Interface + Rules + Cartera Treasury (T-1) files  
 **VENCIMIENTO Validation**: Interface + Rules + Expiries + Cartera Treasury (T0) files  
 **Enhanced VENCIMIENTO**: Also upload Expiry Complementary Data for complete data  
 **INCUMPLIMIENTO Validation**: Interface + Rules + Incumplimientos + Counterparties files
 
-*Note: Cartera Treasury files now provide both MTM values AND estrategia data - no separate Cartera Analytics file needed!*
+*Note: Day trades are now extracted directly from Cartera Treasury (T0) file based on selected date!*
+*Note: Cartera Treasury files provide both MTM values AND estrategia data - no separate files needed!*
 *Note: Enhanced support for new MX estrategia values (COB_MX_ACTIVOS/COB_MX_PASIVOS)*
 """)
 
@@ -104,12 +115,12 @@ if interface_file and rules_file:
         with st.expander("Cartera Treasury (T-1)", expanded=False):
             cartera_treasury_t1_df, cartera_treasury_t1_processed = parse_cartera_treasury_file(cartera_treasury_t1_file, "T-1")
     
-    # Parse other files (unchanged)
+    # NEW: Extract day trades from Cartera T0 if available
     day_trades_df = None
-    if day_trades_file:
-        with st.expander("Day Trades File", expanded=False):
-            day_trades_df = parse_day_trades_file(day_trades_file)
-            
+    if cartera_treasury_t0_df is not None and not cartera_treasury_t0_df.empty:
+        with st.expander("Day Trades (Extracted from Cartera T0)", expanded=False):
+            day_trades_df = extract_day_trades_from_cartera_t0(cartera_treasury_t0_df, pd.to_datetime(selected_date))
+    
     # Parse complementary data first
     expiry_complementary_df = None
     if expiry_complementary_file:
@@ -150,31 +161,35 @@ if interface_file and rules_file:
         with st.expander("Counterparties File", expanded=False):
             counterparties_df = parse_counterparties_file(counterparties_file)
 
-    # MOVED: Validation options - only show available validations AFTER all parsing is complete
+    # UPDATED: Validation options - day trades validation now depends on Cartera T0 + date selection
     st.subheader("Available Validations")
     
     # Check what validations are possible - Updated for integrated Cartera Treasury approach
-    can_validate_day_trades = day_trades_df is not None and not day_trades_df.empty
+    can_validate_day_trades = (day_trades_df is not None and not day_trades_df.empty)  # Now from Cartera T0
     can_validate_mtm = (cartera_treasury_t0_processed is not None and 
-                       not cartera_treasury_t0_processed.empty)  # No separate cartera_df needed
+                       not cartera_treasury_t0_processed.empty)
     can_validate_reversal = (cartera_treasury_t1_processed is not None and 
-                            not cartera_treasury_t1_processed.empty)  # No separate cartera_df needed
+                            not cartera_treasury_t1_processed.empty)
     can_validate_vencimiento = (expiries_file is not None and 
-                              cartera_treasury_t0_df is not None and not cartera_treasury_t0_df.empty)  # Uses T0 for estrategia data
+                              cartera_treasury_t0_df is not None and not cartera_treasury_t0_df.empty)
     can_validate_incumplimiento = incumplimientos_df is not None and not incumplimientos_df.empty
     
     if not any([can_validate_day_trades, can_validate_mtm, can_validate_reversal, can_validate_vencimiento, can_validate_incumplimiento]):
         st.warning("⚠️ No optional files uploaded. Please upload at least one optional file to enable validations.")
-        st.info("📁 Upload Day Trades file for trade validation, Cartera Treasury (T0) for MTM valorization validation, Cartera Treasury (T-1) for MTM reversal validation, Expiries file for VENCIMIENTO validation, or Incumplimientos file for INCUMPLIMIENTO validation.")
+        st.info("📁 Upload Cartera Treasury (T0) for day trades and MTM valorization validation, Cartera Treasury (T-1) for MTM reversal validation, Expiries file for VENCIMIENTO validation, or Incumplimientos file for INCUMPLIMIENTO validation.")
     else:
         col1, col2 = st.columns(2)
         
         with col1:
             if can_validate_day_trades:
-                run_day_trades_validation = st.checkbox("✅ Run Day Trades Validation", value=True)
+                run_day_trades_validation = st.checkbox(f"✅ Run Day Trades Validation ({selected_date})", value=True)
+                st.caption(f"Extracted {len(day_trades_df)} trades from Cartera T0 for {selected_date}")
             else:
-                st.checkbox("❌ Run Day Trades Validation", value=False, disabled=True)
-                st.caption("Requires Day Trades file")
+                st.checkbox(f"❌ Run Day Trades Validation ({selected_date})", value=False, disabled=True)
+                if cartera_treasury_t0_file is None:
+                    st.caption("Requires Cartera Treasury (T0) file")
+                else:
+                    st.caption(f"No trades found for {selected_date} in Cartera T0")
                 run_day_trades_validation = False
                 
             if can_validate_mtm:
@@ -212,11 +227,12 @@ if interface_file and rules_file:
         if available_validations > 0:
             if st.button(f"🚀 Run {available_validations} Validation(s)"):
                 with st.spinner("Running validation..."):
-                    # Run day trades validation if selected
+                    # Run day trades validation if selected - NOW using extracted data from Cartera T0
                     if run_day_trades_validation:
-                        st.header("📊 Day Trades Validation")
+                        st.header(f"📊 Day Trades Validation ({selected_date})")
+                        st.info(f"ℹ️ Using day trades extracted from Cartera Treasury (T0) for {selected_date}")
                         day_trades_results = validate_day_trades(
-                            day_trades_df,
+                            day_trades_df,  # Now from Cartera T0 extraction
                             interface_df,
                             interface_cols,
                             rules_df,
@@ -310,16 +326,17 @@ else:
     - **Accounting Rules**: Rules for validation logic
     
     ### Optional Files (choose based on validation needs):
-    - **Day Trades File**: For validating new trades entered today
-    - **Cartera Treasury (T0)**: For validating current day's MTM valorization (provides both MTM values and estrategia data)
+    - **Cartera Treasury (T0)**: For validating current day's MTM valorization AND extracting day trades (provides MTM values, estrategia data, and day trades data)
     - **Cartera Treasury (T-1)**: For validating reversal of previous day's MTM (provides both MTM values and estrategia data)
     - **Expiries File**: For validating VENCIMIENTO entries
     - **Expiry Complementary Data**: Provides amortization and hedge accounting data for enhanced VENCIMIENTO validation
     - **Incumplimientos File**: For validating INCUMPLIMIENTO entries
     - **Counterparties File**: Contains RUTs of Instituciones Financieras for INCUMPLIMIENTO validation
     
-    ### 🎉 NEW: Simplified File Requirements!
-    - **No separate Cartera Analytics file needed** - estrategia data is now extracted directly from Cartera Treasury files
+    ### 🎉 NEW: Simplified Workflow!
+    - **No separate day trades file needed** - day trades are extracted directly from Cartera Treasury (T0) based on selected date
+    - **Single date picker** - select the date to filter day trades from Cartera Treasury (T0) using 'Fecha Cierre' field
+    - **No separate Cartera Analytics file needed** - estrategia data is extracted directly from Cartera Treasury files  
     - **Enhanced estrategia support** - includes new MX values (COB_MX_ACTIVOS/COB_MX_PASIVOS)
-    - **Single source of truth** - Cartera Treasury provides both MTM values and estrategia data
+    - **Unified data source** - Cartera Treasury provides MTM values, estrategia data, and day trades data
     """)
