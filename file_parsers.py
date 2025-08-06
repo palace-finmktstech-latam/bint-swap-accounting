@@ -947,17 +947,26 @@ def parse_expiry_complementary_file(file):
     df['pataActivaAmortizacion'] = pd.to_numeric(df['pataActivaAmortizacion'], errors='coerce').fillna(0)
     df['pataPasivaAmortizacion'] = pd.to_numeric(df['pataPasivaAmortizacion'], errors='coerce').fillna(0)
     
-    # Convert hedgeAccounting and map YES/NO to Sí/No
+    # Convert hedgeAccounting and map to Sí/No
+    # UPDATED: Handle estrategia codes properly - any non-"NO" value maps to 'Sí'
     df['hedgeAccounting'] = df['hedgeAccounting'].astype(str).str.strip().str.upper()
-    hedge_mapping = {
-        'YES': 'Sí',
-        'NO': 'No',
-        'Y': 'Sí',
-        'N': 'No',
-        '1': 'Sí',
-        '0': 'No'
-    }
-    df['hedgeAccounting_mapped'] = df['hedgeAccounting'].map(hedge_mapping).fillna('No')
+    
+    # Create hedgeAccounting_mapped column
+    def map_hedge_accounting(hedge_value):
+        # If it's explicitly "NO", map to 'No'
+        if hedge_value == 'NO':
+            return 'No'
+        # If it's any other value (including estrategia codes), map to 'Sí' 
+        elif hedge_value in ['YES', 'Y', '1']:
+            return 'Sí'
+        # For estrategia codes (like COB_TASA_INT_ACTIVOS, COB_MX_ACTIVOS, etc.)
+        elif hedge_value.startswith('COB_') or hedge_value not in ['NO', 'NAN', 'NONE', '']:
+            return 'Sí'
+        # Default to 'No' for empty/null values
+        else:
+            return 'No'
+    
+    df['hedgeAccounting_mapped'] = df['hedgeAccounting'].apply(map_hedge_accounting)
     
     # Display summary
     st.write("Expiry Complementary file summary:")

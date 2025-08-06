@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(del examine_expiry_complement.py)"
+    ],
+    "deny": []
+  }
+}
