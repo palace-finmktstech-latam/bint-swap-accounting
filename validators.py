@@ -2390,3 +2390,634 @@ def validate_mtm_entries_new_format(interface_df, interface_cols, cartera_treasu
         st.warning(f"No {event_type} validation results generated")
     
     return validation_df
+
+def detect_desarme_trades(cartera_t0_raw_df, cartera_t1_raw_df):
+    """
+    Detect DESARME trades by comparing Estrategia de Cobertura between T-1 and T0.
+    
+    DESARME trades are those where:
+    - Trade exists in both T-1 and T0 Cartera files
+    - T-1: Estrategia de Cobertura != "NO" 
+    - T0: Estrategia de Cobertura == "NO"
+    
+    Args:
+        cartera_t0_raw_df: Raw Cartera Treasury T0 dataframe
+        cartera_t1_raw_df: Raw Cartera Treasury T-1 dataframe
+        
+    Returns:
+        pd.DataFrame: DataFrame with desarme trades and their data
+    """
+    if cartera_t0_raw_df is None or cartera_t0_raw_df.empty:
+        st.error("❌ Cartera T0 file is required for DESARME detection")
+        return pd.DataFrame()
+        
+    if cartera_t1_raw_df is None or cartera_t1_raw_df.empty:
+        st.error("❌ Cartera T-1 file is required for DESARME detection")
+        return pd.DataFrame()
+    
+    st.write("🔄 Detecting DESARME trades by comparing Estrategia de Cobertura between T-1 and T0...")
+    
+    # Find required columns in both files
+    def find_columns(df, file_name):
+        col_mapping = {}
+        
+        # Find deal number column
+        for col in df.columns:
+            if 'Número' in str(col) and 'Operación' in str(col):
+                col_mapping['deal_number'] = col
+                break
+        
+        # Find estrategia column
+        for col in df.columns:
+            if 'Estrategia' in str(col) and 'Cobertura' in str(col):
+                col_mapping['estrategia'] = col
+                break
+                
+        # Find nocional columns
+        for col in df.columns:
+            if 'Nocional' in str(col) and 'Activa' in str(col):
+                col_mapping['nocional_activa'] = col
+            elif 'Nocional' in str(col) and 'Pasiva' in str(col):
+                col_mapping['nocional_pasiva'] = col
+                
+        # Find MTM column
+        for col in df.columns:
+            if 'Valor M2M' in str(col) and 'CLP' in str(col):
+                col_mapping['mtm'] = col
+                break
+                
+        # Find producto column
+        for col in df.columns:
+            if 'Producto' in str(col):
+                col_mapping['producto'] = col
+                break
+        
+        return col_mapping
+    
+    # Get column mappings for both files
+    t0_cols = find_columns(cartera_t0_raw_df, "T0")
+    t1_cols = find_columns(cartera_t1_raw_df, "T-1")
+    
+    # Check required columns exist
+    required_cols = ['deal_number', 'estrategia']
+    for required in required_cols:
+        if required not in t0_cols:
+            st.error(f"❌ Could not find {required} column in Cartera T0")
+            return pd.DataFrame()
+        if required not in t1_cols:
+            st.error(f"❌ Could not find {required} column in Cartera T-1")
+            return pd.DataFrame()
+    
+    st.write(f"✅ Found required columns in both files")
+    
+    # Extract relevant data from T0
+    t0_data = cartera_t0_raw_df[[
+        t0_cols['deal_number'], 
+        t0_cols['estrategia'],
+        t0_cols.get('nocional_activa'),
+        t0_cols.get('nocional_pasiva'),
+        t0_cols.get('mtm'),
+        t0_cols.get('producto')
+    ]].copy()
+    
+    t0_data.columns = ['deal_number', 'estrategia_t0', 'nocional_activa', 'nocional_pasiva', 'mtm', 'producto']
+    
+    # Extract relevant data from T-1
+    t1_data = cartera_t1_raw_df[[
+        t1_cols['deal_number'], 
+        t1_cols['estrategia']
+    ]].copy()
+    
+    t1_data.columns = ['deal_number', 'estrategia_t1']
+    
+    # Clean deal numbers for matching
+    t0_data['deal_number'] = pd.to_numeric(t0_data['deal_number'], errors='coerce')
+    t1_data['deal_number'] = pd.to_numeric(t1_data['deal_number'], errors='coerce')
+    
+    # Remove rows with invalid deal numbers
+    t0_data = t0_data.dropna(subset=['deal_number']).copy()
+    t1_data = t1_data.dropna(subset=['deal_number']).copy()
+    
+    # Convert deal numbers to int
+    t0_data['deal_number'] = t0_data['deal_number'].astype(int)
+    t1_data['deal_number'] = t1_data['deal_number'].astype(int)
+    
+    # Merge T0 and T-1 data
+    merged_df = t0_data.merge(t1_data, on='deal_number', how='inner')
+    
+    st.write(f"Found {len(merged_df)} trades present in both T0 and T-1 files")
+    
+    # Clean estrategia values
+    merged_df['estrategia_t0'] = merged_df['estrategia_t0'].astype(str).str.strip()
+    merged_df['estrategia_t1'] = merged_df['estrategia_t1'].astype(str).str.strip()
+    
+    # Filter for DESARME trades: T-1 != "NO" and T0 == "NO"
+    desarme_mask = (
+        (merged_df['estrategia_t1'] != 'NO') & 
+        (merged_df['estrategia_t1'] != 'nan') & 
+        (merged_df['estrategia_t1'].notna()) &
+        (merged_df['estrategia_t0'] == 'NO')
+    )
+    
+    desarme_trades = merged_df[desarme_mask].copy()
+    
+    st.write(f"🎯 Detected {len(desarme_trades)} DESARME trades")
+    
+    if len(desarme_trades) > 0:
+        # Convert numeric columns
+        numeric_cols = ['nocional_activa', 'nocional_pasiva', 'mtm']
+        for col in numeric_cols:
+            if col in desarme_trades.columns:
+                desarme_trades[col] = pd.to_numeric(desarme_trades[col], errors='coerce').fillna(0)
+        
+        # Add instrument type mapping
+        product_mapping = {
+            'Swap Tasa': 'Swap Tasa',
+            'Swap Moneda': 'Swap Moneda',
+            'Swap Promedio Cámara': 'Swap Cámara'
+        }
+        
+        desarme_trades['instrument_type'] = desarme_trades['producto'].map(product_mapping)
+        
+        # Show summary
+        st.write("DESARME trades summary:")
+        st.write(f"- Instrument types: {desarme_trades['instrument_type'].value_counts().to_dict()}")
+        st.write(f"- Previous estrategias: {desarme_trades['estrategia_t1'].value_counts().to_dict()}")
+        
+        # Display preview
+        st.subheader("DESARME Trades Preview")
+        display_cols = ['deal_number', 'instrument_type', 'estrategia_t1', 'estrategia_t0', 'nocional_activa', 'nocional_pasiva', 'mtm']
+        available_display_cols = [col for col in display_cols if col in desarme_trades.columns]
+        st.dataframe(desarme_trades[available_display_cols].head(10), use_container_width=True, hide_index=True)
+    
+    return desarme_trades
+
+def validate_desarme_entries(desarme_trades_df, interface_df, interface_cols, rules_df, debug_deal=None):
+    """
+    Validate DESARME entries against accounting interface entries.
+    
+    DESARME has three sub-events that are all combined into one set of entries:
+    1. Curse-like: Uses Nocional Activa/Pasiva with Cobertura='No' + Pata rules
+    2. Termino-like: Uses Nocional Activa/Pasiva with Cobertura='Sí' + Pata rules  
+    3. MTM: Uses MTM values with Cobertura='Sí' + no Pata rules
+    
+    Args:
+        desarme_trades_df: DataFrame of detected DESARME trades
+        interface_df: Accounting interface dataframe
+        interface_cols: Column mapping for interface file
+        rules_df: Accounting rules dataframe
+        debug_deal: Specific deal to debug
+        
+    Returns:
+        pd.DataFrame: Validation results
+    """
+    if desarme_trades_df is None or desarme_trades_df.empty:
+        st.warning("No DESARME trades to validate")
+        return pd.DataFrame()
+    
+    # Filter rules for DESARME event
+    desarme_rules = rules_df[rules_df['event'] == 'Desarme'].copy()
+    
+    if len(desarme_rules) == 0:
+        st.error("No DESARME rules found in rules file")
+        return pd.DataFrame()
+    
+    st.subheader("DESARME Rules Analysis")
+    st.write(f"Found {len(desarme_rules)} DESARME rules")
+    st.dataframe(desarme_rules, use_container_width=True, hide_index=True)
+    
+    # Separate rules by sub-event type
+    curse_like_rules = desarme_rules[
+        (desarme_rules['coverage'] == 'No') & 
+        (desarme_rules['Pata'].notna())
+    ].copy()
+    
+    termino_like_rules = desarme_rules[
+        (desarme_rules['coverage'] == 'Sí') & 
+        (desarme_rules['Pata'].notna())
+    ].copy()
+    
+    mtm_rules = desarme_rules[
+        (desarme_rules['coverage'] == 'Sí') & 
+        (desarme_rules['Pata'].isna())
+    ].copy()
+    
+    st.write(f"Rule breakdown:")
+    st.write(f"- Curse-like rules (Cobertura='No' + Pata): {len(curse_like_rules)}")
+    st.write(f"- Termino-like rules (Cobertura='Sí' + Pata): {len(termino_like_rules)}")
+    st.write(f"- MTM rules (Cobertura='Sí' + no Pata): {len(mtm_rules)}")
+    
+    
+    # Extract needed columns from interface
+    trade_number_col = next((col for col in interface_df.columns if any(x in str(col).lower() for x in ['operación', 'operacion', 'nro.'])), None)
+    debit_col = interface_cols['debit']
+    credit_col = interface_cols['credit']
+    account_col = interface_cols['account']
+    glosa_col = interface_cols['glosa']
+    
+    if not trade_number_col:
+        st.error("Could not find trade number column in interface file")
+        return pd.DataFrame()
+    
+    # Filter interface for DESARME entries by glosa patterns
+    desarme_glosa_patterns = [
+        'Desarme Swap UF-$', 'Desarme Swap UF-USD', 'Desarme Swap USD-CLP', 'Desarme Swap CHF-CLF',
+        'Desarme Swap ICP-CLP', 'Desarme Swap ICP-CLF', 
+        'Desarme Swap Tasa USD-USD', 'Desarme Swap Tasa CLP-CLP', 'Desarme Swap Tasa CLF-CLF', 'Desarme Swap Tasa EUR-EUR'
+    ]
+    
+    # Create a mask for DESARME entries with robust pattern matching
+    desarme_mask = pd.Series(False, index=interface_df.index)
+    
+    # Clean the glosa column to handle encoding issues and whitespace
+    cleaned_glosas = interface_df[glosa_col].astype(str).str.replace('\n', ' ').str.replace('\r', ' ').str.strip()
+    
+    for pattern in desarme_glosa_patterns:
+        # Try exact pattern first
+        exact_matches = cleaned_glosas.str.contains(pattern, case=False, na=False).sum()
+        
+        # If exact doesn't work, try more flexible matching
+        if exact_matches == 0:
+            # Remove spaces and special characters for flexible matching
+            pattern_clean = pattern.replace(' ', '').replace('-', '').replace('$', '')
+            glosas_clean = cleaned_glosas.str.replace(' ', '').str.replace('-', '').str.replace('$', '')
+            flexible_matches = glosas_clean.str.contains(pattern_clean, case=False, na=False).sum()
+            
+            if flexible_matches > 0:
+                desarme_mask |= glosas_clean.str.contains(pattern_clean, case=False, na=False)
+        else:
+            desarme_mask |= cleaned_glosas.str.contains(pattern, case=False, na=False)
+    
+    desarme_entries = interface_df[desarme_mask].copy()
+    st.write(f"Found {len(desarme_entries)} DESARME entries in interface file")
+    
+    # Add instrument type extraction from glosa
+    def extract_instrument_type_from_glosa(glosa):
+        glosa_str = str(glosa).lower()
+        if 'icp' in glosa_str:
+            return 'Swap Cámara'
+        elif 'tasa' in glosa_str:
+            return 'Swap Tasa'
+        else:
+            return 'Swap Moneda'  # Default for currency patterns
+    
+    desarme_entries['instrument_type'] = desarme_entries[glosa_col].apply(extract_instrument_type_from_glosa)
+    
+    # Ensure numeric values
+    desarme_entries[debit_col] = pd.to_numeric(desarme_entries[debit_col], errors='coerce').fillna(0)
+    desarme_entries[credit_col] = pd.to_numeric(desarme_entries[credit_col], errors='coerce').fillna(0)
+    
+    # Prepare validation results
+    validation_results = []
+    
+    st.write(f"Processing {len(desarme_trades_df)} DESARME trades for validation")
+    
+    # Process each DESARME trade
+    for _, desarme_trade in desarme_trades_df.iterrows():
+        deal_number = desarme_trade['deal_number']
+        
+        # Skip if not the debug deal (when in debug mode)
+        if debug_deal is not None and str(deal_number) != str(debug_deal):
+            continue
+            
+        instrument_type = desarme_trade.get('instrument_type', 'Unknown')
+        nocional_activa = abs(float(desarme_trade.get('nocional_activa', 0)))
+        nocional_pasiva = abs(float(desarme_trade.get('nocional_pasiva', 0)))
+        mtm_value = float(desarme_trade.get('mtm', 0))
+        mtm_abs = abs(mtm_value)
+        previous_estrategia = desarme_trade.get('estrategia_t1', 'Unknown')  # The old estrategia from T-1
+        
+        # Determine MTM direction
+        mtm_direction = 'Positivo' if mtm_value > 0 else 'Negativo'
+        
+        # Display debug info if requested
+        if debug_deal is not None:
+            st.write(f"DEBUG DESARME: Processing trade {deal_number}")
+            st.write(f"DEBUG DESARME: Instrument type: {instrument_type}")
+            st.write(f"DEBUG DESARME: Previous estrategia (T-1): {previous_estrategia}")
+            st.write(f"DEBUG DESARME: Nocional Activa: {nocional_activa}, Nocional Pasiva: {nocional_pasiva}")
+            st.write(f"DEBUG DESARME: MTM: {mtm_value} ({mtm_direction})")
+        
+        # Find interface entries for this trade
+        trade_entries = desarme_entries[desarme_entries[trade_number_col] == deal_number].copy()
+        
+        if len(trade_entries) == 0:
+            validation_results.append({
+                'deal_number': str(deal_number),
+                'instrument_type': instrument_type,
+                'nocional_activa': nocional_activa,
+                'nocional_pasiva': nocional_pasiva,
+                'mtm_value': mtm_abs,
+                'mtm_direction': mtm_direction,
+                'status': 'Missing Interface Entries',
+                'interface_entries': 0,
+                'expected_entries': 0,
+                'issue': f'No DESARME entries found in interface for deal {deal_number}'
+            })
+            continue
+        
+        # Validate instrument type consistency
+        interface_instrument_types = trade_entries['instrument_type'].unique()
+        if instrument_type not in interface_instrument_types:
+            st.warning(f"Instrument type mismatch for deal {deal_number}: Expected {instrument_type}, Found {interface_instrument_types}")
+        
+        if debug_deal is not None:
+            st.write(f"DEBUG DESARME: Found {len(trade_entries)} interface entries")
+            st.dataframe(trade_entries, use_container_width=True, hide_index=True)
+        
+        # Build expected accounts and amounts for all three sub-events
+        all_expected_accounts = []
+        all_expected_amounts = {}
+        
+        # Track expected entry counts for each sub-event
+        expected_curse_entries = 0
+        expected_termino_entries = 0
+        expected_mtm_entries = 0
+        
+        # 1. CURSE-LIKE SUB-EVENT (Cobertura='No' + Pata) - Expected: 4 entries
+        curse_applicable_rules = curse_like_rules[curse_like_rules['subproduct'] == instrument_type]
+        
+        if debug_deal is not None:
+            st.write(f"DEBUG DESARME: Found {len(curse_applicable_rules)} curse-like rules for {instrument_type}")
+        
+        activa_curse_rules = curse_applicable_rules[curse_applicable_rules['Pata'] == 'Pata Activa']
+        pasiva_curse_rules = curse_applicable_rules[curse_applicable_rules['Pata'] == 'Pata Pasiva']
+        
+        # Process Pata Activa curse-like rules
+        for _, rule in activa_curse_rules.iterrows():
+            if pd.notna(rule['debit_account']):
+                account = str(rule['debit_account'])
+                all_expected_accounts.append(account)
+                all_expected_amounts[account] = {'amount': nocional_activa, 'pata': 'Activa', 'field': 'debit', 'sub_event': 'curse-like'}
+                expected_curse_entries += 1
+            if pd.notna(rule['credit_account']):
+                account = str(rule['credit_account'])
+                all_expected_accounts.append(account)
+                all_expected_amounts[account] = {'amount': nocional_activa, 'pata': 'Activa', 'field': 'credit', 'sub_event': 'curse-like'}
+                expected_curse_entries += 1
+        
+        # Process Pata Pasiva curse-like rules
+        for _, rule in pasiva_curse_rules.iterrows():
+            if pd.notna(rule['debit_account']):
+                account = str(rule['debit_account'])
+                all_expected_accounts.append(account)
+                all_expected_amounts[account] = {'amount': nocional_pasiva, 'pata': 'Pasiva', 'field': 'debit', 'sub_event': 'curse-like'}
+                expected_curse_entries += 1
+            if pd.notna(rule['credit_account']):
+                account = str(rule['credit_account'])
+                all_expected_accounts.append(account)
+                all_expected_amounts[account] = {'amount': nocional_pasiva, 'pata': 'Pasiva', 'field': 'credit', 'sub_event': 'curse-like'}
+                expected_curse_entries += 1
+        
+        # 2. TERMINO-LIKE SUB-EVENT (Cobertura='Sí' + Pata) - Expected: 4 entries
+        termino_applicable_rules = termino_like_rules[termino_like_rules['subproduct'] == instrument_type]
+        
+        if debug_deal is not None:
+            st.write(f"DEBUG DESARME: Found {len(termino_applicable_rules)} termino-like rules for {instrument_type}")
+        
+        activa_termino_rules = termino_applicable_rules[termino_applicable_rules['Pata'] == 'Pata Activa']
+        pasiva_termino_rules = termino_applicable_rules[termino_applicable_rules['Pata'] == 'Pata Pasiva']
+        
+        # Process Pata Activa termino-like rules
+        for _, rule in activa_termino_rules.iterrows():
+            if pd.notna(rule['debit_account']):
+                account = str(rule['debit_account'])
+                all_expected_accounts.append(account)
+                all_expected_amounts[account] = {'amount': nocional_activa, 'pata': 'Activa', 'field': 'debit', 'sub_event': 'termino-like'}
+                expected_termino_entries += 1
+            if pd.notna(rule['credit_account']):
+                account = str(rule['credit_account'])
+                all_expected_accounts.append(account)
+                all_expected_amounts[account] = {'amount': nocional_activa, 'pata': 'Activa', 'field': 'credit', 'sub_event': 'termino-like'}
+                expected_termino_entries += 1
+        
+        # Process Pata Pasiva termino-like rules
+        for _, rule in pasiva_termino_rules.iterrows():
+            if pd.notna(rule['debit_account']):
+                account = str(rule['debit_account'])
+                all_expected_accounts.append(account)
+                all_expected_amounts[account] = {'amount': nocional_pasiva, 'pata': 'Pasiva', 'field': 'debit', 'sub_event': 'termino-like'}
+                expected_termino_entries += 1
+            if pd.notna(rule['credit_account']):
+                account = str(rule['credit_account'])
+                all_expected_accounts.append(account)
+                all_expected_amounts[account] = {'amount': nocional_pasiva, 'pata': 'Pasiva', 'field': 'credit', 'sub_event': 'termino-like'}
+                expected_termino_entries += 1
+        
+        # 3. MTM SUB-EVENT (Cobertura='Sí' + no Pata) - Expected: 2 entries
+        # First, let's check what direction values exist in the rules
+        if debug_deal is not None:
+            available_directions = mtm_rules['direction'].unique()
+            st.write(f"DEBUG DESARME: Available directions in MTM rules: {available_directions}")
+            st.write(f"DEBUG DESARME: Looking for direction: '{mtm_direction}' (MTM value: {mtm_value})")
+            
+            # Check subproduct filtering
+            subproduct_matches = mtm_rules[mtm_rules['subproduct'] == instrument_type]
+            st.write(f"DEBUG DESARME: Found {len(subproduct_matches)} MTM rules for subproduct {instrument_type}")
+            
+            # Check direction filtering
+            direction_matches = mtm_rules[mtm_rules['direction'] == mtm_direction]
+            st.write(f"DEBUG DESARME: Found {len(direction_matches)} MTM rules for direction {mtm_direction}")
+            
+            # Check estrategia filtering
+            estrategia_matches = mtm_rules[mtm_rules['Estrategia'] == previous_estrategia]
+            st.write(f"DEBUG DESARME: Found {len(estrategia_matches)} MTM rules for estrategia {previous_estrategia}")
+        
+        # Filter MTM rules by subproduct, direction, AND estrategia
+        mtm_applicable_rules = mtm_rules[
+            (mtm_rules['subproduct'] == instrument_type) & 
+            (mtm_rules['direction'] == mtm_direction) &
+            (mtm_rules['Estrategia'] == previous_estrategia)
+        ]
+        
+        if debug_deal is not None:
+            st.write(f"DEBUG DESARME: Found {len(mtm_applicable_rules)} MTM rules after all three filters (subproduct + direction + estrategia)")
+        
+        # Process MTM rules
+        for _, rule in mtm_applicable_rules.iterrows():
+            if pd.notna(rule['debit_account']):
+                account = str(rule['debit_account'])
+                all_expected_accounts.append(account)
+                all_expected_amounts[account] = {'amount': mtm_abs, 'field': 'debit', 'sub_event': 'mtm'}
+                expected_mtm_entries += 1
+            if pd.notna(rule['credit_account']):
+                account = str(rule['credit_account'])
+                all_expected_accounts.append(account)
+                all_expected_amounts[account] = {'amount': mtm_abs, 'field': 'credit', 'sub_event': 'mtm'}
+                expected_mtm_entries += 1
+        
+        # Remove duplicates and "None" values
+        all_expected_accounts = list(dict.fromkeys([acc for acc in all_expected_accounts if acc != "None" and acc != "nan"]))
+        expected_entry_count = len(all_expected_accounts)
+        
+        # Show expected entry breakdown
+        st.write(f"Expected entries: Curse-like: {expected_curse_entries} (should be 4), Termino-like: {expected_termino_entries} (should be 4), MTM: {expected_mtm_entries} (should be 2)")
+        st.write(f"Raw total before deduplication: {expected_curse_entries + expected_termino_entries + expected_mtm_entries}")
+        st.write(f"Total expected entries after deduplication: {expected_entry_count} | Total interface entries: {len(trade_entries)}")
+        
+        # Debug MTM rules in detail
+        if expected_mtm_entries > 2:
+            st.warning(f"⚠️ MTM rules returning {expected_mtm_entries} entries instead of expected 2. Investigating...")
+            st.write("MTM rule details:")
+            for i, (_, rule) in enumerate(mtm_applicable_rules.iterrows()):
+                st.write(f"  Rule {i+1}: Subproduct={rule.get('subproduct')}, Direction={rule.get('direction')}, Debit={rule.get('debit_account')}, Credit={rule.get('credit_account')}")
+        
+        # Debug duplicates
+        if (expected_curse_entries + expected_termino_entries + expected_mtm_entries) != expected_entry_count:
+            duplicates_removed = (expected_curse_entries + expected_termino_entries + expected_mtm_entries) - expected_entry_count
+            st.write(f"🔍 {duplicates_removed} duplicate accounts were removed during deduplication")
+            
+            # Show which accounts appear multiple times
+            all_accounts_with_duplicates = []
+            for acc, info in all_expected_amounts.items():
+                all_accounts_with_duplicates.append(acc)
+            
+            from collections import Counter
+            account_counts = Counter(all_accounts_with_duplicates)
+            duplicated_accounts = {acc: count for acc, count in account_counts.items() if count > 1}
+            
+            if duplicated_accounts:
+                st.write("Accounts appearing multiple times:")
+                for acc, count in duplicated_accounts.items():
+                    st.write(f"  {acc}: appears {count} times")
+            else:
+                st.write("No individual account duplicates found (might be due to list deduplication logic)")
+        
+        if debug_deal is not None:
+            st.write(f"DEBUG DESARME: Expected accounts: {all_expected_accounts}")
+            st.write("DEBUG DESARME: Expected amounts by account:")
+            for acc, info in all_expected_amounts.items():
+                pata_info = f", {info['pata']}" if 'pata' in info else ""
+                st.write(f"  {acc}: {info['amount']} ({info['field']}{pata_info}, {info['sub_event']})")
+        
+        # Validate using the comprehensive validation approach
+        status, issue, extra_entry_count = _validate_desarme_entries_comprehensive(
+            trade_entries, all_expected_accounts, all_expected_amounts, 
+            account_col, debit_col, credit_col, debug_deal
+        )
+        
+        validation_results.append({
+            'deal_number': str(deal_number),
+            'instrument_type': instrument_type,
+            'nocional_activa': nocional_activa,
+            'nocional_pasiva': nocional_pasiva,
+            'mtm_value': mtm_abs,
+            'mtm_direction': mtm_direction,
+            'status': status,
+            'interface_entries': len(trade_entries),
+            'expected_entries': expected_entry_count,
+            'extra_entries': extra_entry_count,
+            'issue': issue
+        })
+    
+    # Create validation results dataframe
+    validation_df = pd.DataFrame(validation_results)
+    
+    if len(validation_df) > 0:
+        # Format for display
+        for col in validation_df.columns:
+            if validation_df[col].dtype == 'object':
+                validation_df[col] = validation_df[col].astype(str)
+        
+        # Round numeric columns
+        numeric_cols = validation_df.select_dtypes(include=['float64', 'int64']).columns
+        for col in numeric_cols:
+            validation_df[col] = validation_df[col].round(2)
+        
+        # Display validation results
+        st.subheader("DESARME Validation Results")
+        st.write("Validates DESARME entries with three combined sub-events:")
+        st.write("• Curse-like: Nocional amounts with Cobertura='No' + Pata rules")
+        st.write("• Termino-like: Nocional amounts with Cobertura='Sí' + Pata rules")
+        st.write("• MTM: MTM values with Cobertura='Sí' + no Pata rules")
+        st.dataframe(validation_df, use_container_width=True, hide_index=True)
+        
+        # Calculate match statistics
+        full_match_count = len(validation_df[validation_df['status'] == 'Full Match'])
+        total_count = len(validation_df)
+        match_percentage = (full_match_count / total_count * 100) if total_count > 0 else 0
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total DESARME Trades", total_count)
+        with col2:
+            st.metric("Full Matches", full_match_count)
+        with col3:
+            st.metric("Match Rate", f"{match_percentage:.1f}%")
+        
+        # Status breakdown
+        status_counts = validation_df['status'].value_counts().to_dict()
+        st.subheader("DESARME Status Breakdown")
+        st.write(status_counts)
+        
+        # Download results
+        csv = validation_df.to_csv().encode('utf-8')
+        st.download_button(
+            "Download DESARME Validation Results",
+            csv,
+            "desarme_validation_results.csv",
+            "text/csv",
+            key="download-csv-desarme"
+        )
+    else:
+        st.warning("No DESARME validation results generated")
+    
+    return validation_df
+
+def _validate_desarme_entries_comprehensive(entries_df, expected_accounts, expected_amounts, 
+                                          account_col, debit_col, credit_col, debug_deal):
+    """
+    Comprehensive validation for DESARME entries that handles three sub-events.
+    
+    Returns: (status, issue, extra_entry_count)
+    """
+    if len(entries_df) == 0:
+        return 'Missing Entries', 'No DESARME entries found in interface', 0
+    
+    expected_entry_count = len(expected_accounts)
+    extra_entry_count = max(0, len(entries_df) - expected_entry_count)
+    
+    # Check if all required accounts are present
+    found_accounts = entries_df[account_col].astype(str).unique().tolist()
+    missing_accounts = [acc for acc in expected_accounts if acc not in found_accounts]
+    
+    if missing_accounts:
+        return 'Missing Accounts', f'Missing expected accounts: {", ".join(missing_accounts)}', extra_entry_count
+    
+    # Check amounts for all expected accounts
+    all_match = True
+    mismatches = []
+    
+    for account in expected_accounts:
+        account_entries = entries_df[entries_df[account_col].astype(str) == account]
+        expected_info = expected_amounts[account]
+        expected_amount = expected_info['amount']
+        expected_field = expected_info['field']
+        sub_event = expected_info['sub_event']
+        
+        if expected_field == 'debit':
+            actual_amount = account_entries[debit_col].sum()
+        else:
+            actual_amount = account_entries[credit_col].sum()
+        
+        is_matching = abs(actual_amount - expected_amount) < 1.0
+        if not is_matching:
+            all_match = False
+            pata_info = f", {expected_info['pata']}" if 'pata' in expected_info else ""
+            mismatches.append(f"{account} ({expected_field}{pata_info}, {sub_event}): Expected {expected_amount}, Found {actual_amount:.2f}")
+        
+        if debug_deal is not None:
+            status_icon = "✅" if is_matching else "❌"
+            pata_info = f", {expected_info['pata']}" if 'pata' in expected_info else ""
+            st.write(f"{status_icon} DESARME Account {account} ({expected_field}{pata_info}, {sub_event}): Expected {expected_amount}, Found {actual_amount:.2f}")
+    
+    # Determine status
+    if not all_match:
+        return 'Amount Mismatch', f"Required entry mismatches: {'; '.join(mismatches)}", extra_entry_count
+    
+    if extra_entry_count > 0:
+        extra_accounts = [acc for acc in found_accounts if acc not in expected_accounts]
+        extra_info = f" (extra accounts: {', '.join(extra_accounts)})" if extra_accounts else " (duplicate entries)"
+        return 'Correct + Extra Entries', f"All required entries correct, but {extra_entry_count} unnecessary entries found{extra_info}", extra_entry_count
+    
+    return 'Full Match', '', extra_entry_count

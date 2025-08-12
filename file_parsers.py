@@ -1171,7 +1171,8 @@ def parse_rules_file(file):
             'VENCIMIENTO': 'Vencimiento',
             'TERMINO': 'Termino',
             'REVERSA_VALORIZACION': 'Reversa Valorización MTM',
-            'INCUMPLIMIENTO': 'Incumplimiento'  # New event type
+            'INCUMPLIMIENTO': 'Incumplimiento',  # New event type
+            'DESARME': 'Desarme'  # NEW: DESARME event type
         }
         df['event'] = df['event'].map(event_mapping)
     

@@ -20,7 +20,9 @@ from validators import (
     validate_day_trades, 
     validate_mtm_entries_new_format,  # NEW: Replaces validate_mtm_entries
     validate_vencimiento_entries, 
-    validate_incumplimiento_entries
+    validate_incumplimiento_entries,
+    detect_desarme_trades,  # NEW: DESARME detection
+    validate_desarme_entries  # NEW: DESARME validation
 )
 
 # Streamlit page configuration
@@ -173,8 +175,10 @@ if interface_file and rules_file:
     can_validate_vencimiento = (expiries_file is not None and 
                               cartera_treasury_t0_df is not None and not cartera_treasury_t0_df.empty)
     can_validate_incumplimiento = incumplimientos_df is not None and not incumplimientos_df.empty
+    can_validate_desarme = (cartera_treasury_t0_df is not None and not cartera_treasury_t0_df.empty and
+                           cartera_treasury_t1_df is not None and not cartera_treasury_t1_df.empty)
     
-    if not any([can_validate_day_trades, can_validate_mtm, can_validate_reversal, can_validate_vencimiento, can_validate_incumplimiento]):
+    if not any([can_validate_day_trades, can_validate_mtm, can_validate_reversal, can_validate_vencimiento, can_validate_incumplimiento, can_validate_desarme]):
         st.warning("⚠️ No optional files uploaded. Please upload at least one optional file to enable validations.")
         st.info("📁 Upload Cartera Treasury (T0) for day trades and MTM valorization validation, Cartera Treasury (T-1) for MTM reversal validation, Expiries file for VENCIMIENTO validation, or Incumplimientos file for INCUMPLIMIENTO validation.")
     else:
@@ -220,9 +224,16 @@ if interface_file and rules_file:
                 st.checkbox("❌ Run VENCIMIENTO Validation", value=False, disabled=True)
                 st.caption("Requires Expiries and Cartera Treasury (T0) files")
                 run_vencimiento_validation = False
+                
+            if can_validate_desarme:
+                run_desarme_validation = st.checkbox("✅ Run DESARME Validation", value=True)
+            else:
+                st.checkbox("❌ Run DESARME Validation", value=False, disabled=True)
+                st.caption("Requires Cartera Treasury (T0) and (T-1) files")
+                run_desarme_validation = False
         
         # Run validations button - only show if at least one validation is selected
-        available_validations = sum([run_day_trades_validation, run_mtm_validation, run_reversal_validation, run_vencimiento_validation, run_incumplimiento_validation])
+        available_validations = sum([run_day_trades_validation, run_mtm_validation, run_reversal_validation, run_vencimiento_validation, run_incumplimiento_validation, run_desarme_validation])
         
         if available_validations > 0:
             if st.button(f"🚀 Run {available_validations} Validation(s)"):
@@ -311,6 +322,26 @@ if interface_file and rules_file:
                             counterparties_df,
                             debug_deal=debug_deal
                         )
+                    
+                    # Run DESARME validation if selected (NEW)
+                    if run_desarme_validation:
+                        st.header("🔄 DESARME Validation")
+                        st.info("ℹ️ Detecting trades moving from hedge accounting to no hedge accounting (T-1 vs T0)")
+                        
+                        # First detect DESARME trades
+                        desarme_trades_df = detect_desarme_trades(cartera_treasury_t0_df, cartera_treasury_t1_df)
+                        
+                        if desarme_trades_df is not None and not desarme_trades_df.empty:
+                            # Then validate the detected DESARME trades
+                            desarme_results = validate_desarme_entries(
+                                desarme_trades_df,
+                                interface_df,
+                                interface_cols,
+                                rules_df,
+                                debug_deal=debug_deal
+                            )
+                        else:
+                            st.info("No DESARME trades detected between T-1 and T0 Cartera files")
         else:
             st.info("Please select at least one validation to run.")
 
@@ -328,6 +359,7 @@ else:
     ### Optional Files (choose based on validation needs):
     - **Cartera Treasury (T0)**: For validating current day's MTM valorization AND extracting day trades (provides MTM values, estrategia data, and day trades data)
     - **Cartera Treasury (T-1)**: For validating reversal of previous day's MTM (provides both MTM values and estrategia data)
+    - **Cartera Treasury (T0 + T-1)**: For validating DESARME events (trades moving from hedge accounting to no hedge accounting)
     - **Expiries File**: For validating VENCIMIENTO entries
     - **Expiry Complementary Data**: Provides amortization and hedge accounting data for enhanced VENCIMIENTO validation
     - **Incumplimientos File**: For validating INCUMPLIMIENTO entries
